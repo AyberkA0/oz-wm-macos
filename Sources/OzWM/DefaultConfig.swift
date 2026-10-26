@@ -59,7 +59,9 @@ oz.set({
 
   // Buttons that scroll the strip one step (easiest to pick in Settings › Mouse buttons):
   // "mouse:3" (a side button), "key:<code>:<modifiers>", "media:<code>"; "" for none.
-  // scrollButtons: { up: "mouse:3", down: "mouse:4" },
+  // Held with them (desktopModifier: "shift" | "control" | "option" | "command" | "none"),
+  // up goes to the desktop on the left and down to the one on the right.
+  // scrollButtons: { up: "mouse:3", down: "mouse:4", desktopModifier: "shift" },
   demoMode: false,               // ctrl+alt+shift+o opens Wizard of Oz demo windows (also in Settings)
   debug: false,                  // verbose log
 });

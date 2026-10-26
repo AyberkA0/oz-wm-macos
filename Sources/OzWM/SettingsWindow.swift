@@ -207,7 +207,14 @@ private struct SettingsView: View {
             Section("Mouse buttons") {
                 buttonRow("Scroll up", -1, model.s.scrollUpButton)
                 buttonRow("Scroll down", 1, model.s.scrollDownButton)
-                Text("Click Set…, then press the button to use: a mouse's side button, a key or a media key. Esc cancels. With magnetic scrolling each press moves one window, otherwise half a screen.")
+                Picker("Switch desktop while holding", selection: model.binding(\.desktopModifier, ["scrollButtons", "desktopModifier"], json: { $0 })) {
+                    Text("Shift").tag("shift")
+                    Text("Control").tag("control")
+                    Text("Option").tag("option")
+                    Text("Command").tag("command")
+                    Text("Off").tag("none")
+                }
+                Text("Click Set…, then press the button to use: a mouse's side button, a key or a media key. Esc cancels. With magnetic scrolling each press moves one window, otherwise half a screen. Held with the key above, up goes to the desktop on the left and down to the one on the right.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

@@ -94,6 +94,10 @@ final class ScrollButtons {
     private(set) var down: InputTrigger?
     /// A picked button was pressed: -1 up, +1 down.
     var onScroll: ((Int) -> Void)?
+    /// Held with a picked button, it switches desktop instead (`onDesktop`: -1 the one on the
+    /// left, +1 the one on the right). Nil: no such key.
+    var desktopModifier: CGEventFlags?
+    var onDesktop: ((Int) -> Void)?
 
     private var tap: CFMachPort?
     private var listener: ((InputTrigger?) -> Void)?
@@ -173,6 +177,19 @@ final class ScrollButtons {
             return nil
         }
         if !down, release(t) { return nil }
+        // With the desktop key held: switch desktop. A key button counts with that key added.
+        if down, let mod = desktopModifier, event.flags.contains(mod) {
+            var bare = t
+            if case .key(let k, let m) = t.kind { bare = InputTrigger(.key(k, m & ~mod.rawValue)) }
+            if bare == self.up || bare == self.down {
+                hold(t)
+                // Not again while held: one desktop per press.
+                guard event.getIntegerValueField(.keyboardEventAutorepeat) == 0 else { return nil }
+                let dir = bare == self.down ? 1 : -1
+                DispatchQueue.main.async { [weak self] in self?.onDesktop?(dir) }
+                return nil
+            }
+        }
         guard down, t == self.up || t == self.down else { return Unmanaged.passUnretained(event) }
         // Held keys repeat: one step per repeat, like holding an arrow key.
         hold(t)

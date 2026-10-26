@@ -82,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsWindow.listen = { [unowned self] done in scrollButtons.listen { done($0?.string) } }
         settingsWindow.stopListening = { [unowned self] in scrollButtons.stopListening() }
         scrollButtons.onScroll = { [unowned self] dir in wm.scrollStep(dir) }
+        scrollButtons.onDesktop = { dir in SystemActions.switchDesktop(dir) }
         config.load()
         config.watch()
         wm.start()
@@ -334,6 +335,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         gestures.configure(s)
         if started { wm.settingsChanged(); updatePassThrough() }
         updateDemo(s.demoMode)
+        scrollButtons.desktopModifier = [
+            "shift": CGEventFlags.maskShift, "control": .maskControl, "option": .maskAlternate, "command": .maskCommand,
+        ][s.desktopModifier]
         scrollButtons.set(up: InputTrigger(s.scrollUpButton), down: InputTrigger(s.scrollDownButton))
         settingsWindow.refresh(s)
     }

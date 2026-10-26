@@ -81,6 +81,9 @@ public struct Settings {
     /// or down, as stored by the Settings window: "mouse:3", "key:<code>:<modifiers>", "media:<code>".
     public var scrollUpButton: String?
     public var scrollDownButton: String?
+    /// Held with those buttons, they switch desktop instead (up: the one on the left, down:
+    /// the one on the right): "shift", "control", "option", "command", or "none".
+    public var desktopModifier = "shift"
     public var debug = false
 
     public init() {}
@@ -122,6 +125,8 @@ public struct Settings {
             // An empty string clears one (the Settings window's Clear, over the config's).
             if let v = b["up"] as? String { scrollUpButton = v.isEmpty ? nil : v }
             if let v = b["down"] as? String { scrollDownButton = v.isEmpty ? nil : v }
+            if let v = b["desktopModifier"] as? String,
+               ["shift", "control", "option", "command", "none"].contains(v) { desktopModifier = v }
         }
         if let v = j["debug"] as? Bool { debug = v }
 

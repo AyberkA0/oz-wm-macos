@@ -13,6 +13,8 @@ enum SystemActions {
         static let f11: CGKeyCode = 0x67
         static let upArrow: CGKeyCode = 0x7E
         static let downArrow: CGKeyCode = 0x7D
+        static let leftArrow: CGKeyCode = 0x7B
+        static let rightArrow: CGKeyCode = 0x7C
     }
 
     private typealias DockNotify = @convention(c) (CFString, Int32) -> Void
@@ -54,6 +56,12 @@ enum SystemActions {
             CGRectMakeWithDictionaryRepresentation(b as! CFDictionary, &r)
             return screens.contains { r.width >= $0.width - 1 && r.height >= $0.height - 1 }
         }
+    }
+
+    /// The desktop (Space) on the left (-1) or right (+1): macOS's own "Move left/right a
+    /// space" shortcut, ⌃← / ⌃→.
+    static func switchDesktop(_ dir: Int) {
+        postKey(dir < 0 ? Key.leftArrow : Key.rightArrow, flags: [.maskControl, .maskSecondaryFn, .maskNumericPad])
     }
 
     static func showDesktop() {
