@@ -207,6 +207,12 @@ private struct SettingsView: View {
             Section("Mouse buttons") {
                 buttonRow("Scroll up", -1, model.s.scrollUpButton)
                 buttonRow("Scroll down", 1, model.s.scrollDownButton)
+                if [model.s.scrollUpButton, model.s.scrollDownButton].contains(where: { $0?.hasPrefix("media:") == true }) {
+                    // macOS doesn't say which device a media key came from.
+                    Text("A media key is picked: the keyboard's own key (volume, play…) will scroll too. To keep it, have the mouse send a key of its own (in its app, or Karabiner-Elements) and pick that.")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                }
                 Picker("Switch desktop while holding", selection: model.binding(\.desktopModifier, ["scrollButtons", "desktopModifier"], json: { $0 })) {
                     Text("Shift").tag("shift")
                     Text("Control").tag("control")
