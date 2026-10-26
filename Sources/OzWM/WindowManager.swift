@@ -926,20 +926,8 @@ final class WindowManager {
     // MARK: Discovery
 
     private func managedApps() -> [NSRunningApplication] {
-        NSWorkspace.shared.runningApplications.filter { $0.processIdentifier != getpid() && Self.hasWindows($0) }
-    }
-
-    /// An app whose windows Oz tiles: a regular one (in the Dock), or a helper inside another
-    /// app's bundle that draws that app's windows without a Dock icon of its own: Steam's are
-    /// "Steam Helper" (in Steam.app/Contents/…), and were never seen. Standalone apps without
-    /// a Dock icon (menu bar apps) and the system's own helpers stay out.
-    static func hasWindows(_ app: NSRunningApplication) -> Bool {
-        switch app.activationPolicy {
-        case .regular: return true
-        case .accessory:
-            guard let url = app.bundleURL, url.pathExtension == "app" else { return false }
-            return url.path.contains(".app/Contents/") && !url.path.hasPrefix("/System/")
-        default: return false
+        NSWorkspace.shared.runningApplications.filter {
+            $0.activationPolicy == .regular && $0.processIdentifier != getpid()
         }
     }
 
@@ -1268,7 +1256,7 @@ final class WindowManager {
     }
 
     private func appLaunched(_ app: NSRunningApplication) {
-        guard enabled, Self.hasWindows(app) else { return }
+        guard enabled, app.activationPolicy == .regular else { return }
         let pid = app.processIdentifier
         ensureObserver(pid)
         // The first window often exists before our observer is registered.
