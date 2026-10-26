@@ -77,6 +77,10 @@ public struct Settings {
     ]
     /// Demo mode: a shortcut (ctrl+alt+shift+o) opens stand-in Wizard of Oz windows.
     public var demoMode = false
+    /// Buttons (a mouse's side buttons, a key, a media key) that scroll the strip one step up
+    /// or down, as stored by the Settings window: "mouse:3", "key:<code>:<modifiers>", "media:<code>".
+    public var scrollUpButton: String?
+    public var scrollDownButton: String?
     public var debug = false
 
     public init() {}
@@ -114,6 +118,11 @@ public struct Settings {
         if let v = num(j["slowAppThreshold"]), v > 0 { slowAppThreshold = v }
         if let a = j["passThroughApps"] as? [Any] { passThroughApps = a.compactMap { $0 as? String } }
         if let v = j["demoMode"] as? Bool { demoMode = v }
+        if let b = j["scrollButtons"] as? [String: Any] {
+            // An empty string clears one (the Settings window's Clear, over the config's).
+            if let v = b["up"] as? String { scrollUpButton = v.isEmpty ? nil : v }
+            if let v = b["down"] as? String { scrollDownButton = v.isEmpty ? nil : v }
+        }
         if let v = j["debug"] as? Bool { debug = v }
 
         if let s = j["swipe"] as? [String: Any] {

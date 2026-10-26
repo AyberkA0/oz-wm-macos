@@ -57,6 +57,33 @@ final class SettingsModel: ObservableObject {
 
     init(_ s: OzCore.Settings) { self.s = s }
 
+    /// Picks a scroll button: the next button pressed goes to the callback (nil: cancelled).
+    var listen: ((@escaping (String?) -> Void) -> Void)?
+    var stopListening: (() -> Void)?
+    /// Waiting for a button for scrolling up (-1) or down (+1).
+    @Published var listening: Int?
+
+    func pickButton(_ dir: Int) {
+        if listening != nil { stopListening?() }
+        listening = dir
+        listen? { [weak self] value in
+            guard let self, self.listening == dir else { return }
+            self.listening = nil
+            if let value { self.setButton(dir, value) }
+        }
+    }
+
+    func cancelPick() {
+        stopListening?()
+        listening = nil
+    }
+
+    func setButton(_ dir: Int, _ value: String?) {
+        if dir < 0 { s.scrollUpButton = value } else { s.scrollDownButton = value }
+        SettingsOverrides.set(["scrollButtons", dir < 0 ? "up" : "down"], value ?? "")
+        onChange?()
+    }
+
     /// Not a config setting: macOS keeps it (a login item), so it is read from there.
     @Published var startAtLogin = LoginItem.isEnabled
     @Published var loginNeedsApproval = LoginItem.needsApproval
@@ -177,6 +204,13 @@ private struct SettingsView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
+            Section("Mouse buttons") {
+                buttonRow("Scroll up", -1, model.s.scrollUpButton)
+                buttonRow("Scroll down", 1, model.s.scrollDownButton)
+                Text("Click Set…, then press the button to use: a mouse's side button, a key or a media key. Esc cancels. With magnetic scrolling each press moves one window, otherwise half a screen.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
             Section {
                 Text("These settings apply on top of ~/.config/oz/config.js, which is left as it is. Shortcuts and window rules are set there.")
                     .font(.footnote)
@@ -190,6 +224,21 @@ private struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 480)
+    }
+
+    private func buttonRow(_ title: String, _ dir: Int, _ value: String?) -> some View {
+        LabeledContent(title) {
+            HStack {
+                Text(model.listening == dir ? "Press a button…" : InputTrigger(value)?.label ?? "Not set")
+                    .foregroundStyle(model.listening == dir ? .primary : .secondary)
+                if model.listening == dir {
+                    Button("Cancel") { model.cancelPick() }
+                } else {
+                    Button("Set…") { model.pickButton(dir) }
+                    if value != nil { Button("Clear") { model.setButton(dir, nil) } }
+                }
+            }
+        }
     }
 
     private func slider(_ title: String, _ value: Binding<Double>, _ range: ClosedRange<Double>, step: Double,
@@ -221,6 +270,9 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     /// on every step), and with true after a reset.
     var apply: ((_ reset: Bool) -> Void)?
     var editConfig: (() -> Void)?
+    /// Listening for a scroll button (see `SettingsModel.listen`).
+    var listen: ((@escaping (String?) -> Void) -> Void)?
+    var stopListening: (() -> Void)?
 
     func show(current: OzCore.Settings) {
         if let window, let model {
@@ -232,6 +284,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         }
         let model = SettingsModel(current)
         model.onChange = { [weak self] in self?.scheduleApply() }
+        model.listen = listen
+        model.stopListening = stopListening
         let view = SettingsView(model: model, onReset: { [weak self] in
             SettingsOverrides.reset()
             self?.pending?.cancel()
@@ -264,6 +318,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        if model?.listening != nil { model?.cancelPick() }
         // Drop the SwiftUI view while it isn't shown; it's rebuilt on the next open.
         window?.contentView = nil
         window = nil

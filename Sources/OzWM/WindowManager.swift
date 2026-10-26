@@ -2068,10 +2068,8 @@ final class WindowManager {
             let vh = viewport(screen).height
             var range = 0...strip.maxScroll(viewportHeight: vh, gap: settings.gap)
             if settings.swipe.snap == .always {
-                let s = strip.scrollY, far = vh * 100
-                let up = strip.snapTarget(from: s - far, velocity: -far, start: s, viewportHeight: vh, gap: settings.gap)
-                let down = strip.snapTarget(from: s + far, velocity: far, start: s, viewportHeight: vh, gap: settings.gap)
-                range = min(up, s)...max(down, s)
+                let s = strip.scrollY
+                range = min(nextWindow(strip, from: s, -1, vh: vh), s)...max(nextWindow(strip, from: s, 1, vh: vh), s)
             }
             gesture = GestureState(key: key, strip: strip, screen: screen, startScroll: strip.scrollY, range: range,
                                    free: strip.scrollY)
@@ -2246,6 +2244,31 @@ final class WindowManager {
             apply(strip, screen: screen, key: key)
             settle(strip, screen: screen)
         }
+    }
+
+    /// Where a magnetic step from `s` (-1 up, +1 down) lands: the next window that way. Asked
+    /// as a short nudge that way (a huge one ran into the strip's end, which is a resting
+    /// place of its own, and answered "the end").
+    private func nextWindow(_ strip: Strip, from s: CGFloat, _ dir: Int, vh: CGFloat) -> CGFloat {
+        let d = CGFloat(dir)
+        return strip.snapTarget(from: s + d * 40, velocity: d * vh * 0.2, start: s, viewportHeight: vh, gap: settings.gap)
+    }
+
+    /// One step up (-1) or down (+1), from a button (Settings › Mouse buttons): the next window
+    /// with magnetic scrolling, half a screen otherwise. Presses in a row add up (each starts
+    /// where the last is heading). Not while a window covers the strip, as with a swipe.
+    func scrollStep(_ dir: Int) {
+        guard enabled, !overviewActive, gesture == nil, let screen = Geometry.screenUnderMouse() else { return }
+        let key = visibleKey(for: screen)
+        guard let strip = strips[key], !strip.isEmpty, maximizedID(key) == nil, !appFilledScreen(screen) else { return }
+        let vh = viewport(screen).height
+        let from = strip.scrollY
+        let target = settings.swipe.snap == .always
+            ? nextWindow(strip, from: from, dir, vh: vh)
+            : strip.clampScroll(from + CGFloat(dir) * vh / 2, viewportHeight: vh, gap: settings.gap)
+        guard abs(target - from) > 0.5 else { return }
+        strip.scrollY = target
+        animate(key, duration: max(settings.animationDuration * 1.5, 0.25))
     }
 
     /// A magnetic swipe this strong moves three windows instead of one: the fingers went this
