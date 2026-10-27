@@ -253,9 +253,11 @@ final class WindowManager {
     /// Floating and docked windows sent to the Dock: brought back, they go back there (the
     /// region and place they had) rather than into the strip.
     private var minimizedFloating: [CGWindowID: (manual: Bool, dock: (key: StripKey, region: Int, index: Int)?)] = [:]
-    /// The floating window under the last single click and where it was: by the time Oz sees
+    /// The managed window under the last single click and where it was: by the time Oz sees
     /// a double click (a global event, after the app's), its app may have zoomed it already.
     private var clickedFloating: (id: CGWindowID, frame: CGRect)?
+    /// Floating windows Oz made fill the screen itself (their app ignored the double click).
+    private var forcedZoom: Set<CGWindowID> = []
     /// Floating windows the user took out of the strip (dragged out of the scroll area, a
     /// tab torn off outside it, toggleFloat): dropping one into a scroll area tiles it again.
     /// Windows floating because of a rule or a fixed size are not in here.
@@ -3302,10 +3304,42 @@ final class WindowManager {
             var r = CGRect.zero
             CGRectMakeWithDictionaryRepresentation(b as! CFDictionary, &r)
             guard r.contains(p) else { continue }
-            guard let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value, floating[id] != nil else { return nil }
+            guard let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+                  floating[id] != nil || windows[id] != nil else { return nil }
             return (id, r)
         }
         return nil
+    }
+
+    /// No title bar of macOS's own (no close button), yet resizable: the app draws its own
+    /// (Steam), and a double click on it may do nothing. App queue.
+    static func drawsOwnTitleBar(_ el: AXUIElement) -> Bool {
+        AX.element(el, kAXCloseButtonAttribute) == nil && AX.isSettable(el, kAXSizeAttribute)
+    }
+
+    /// A window Oz made fill the screen for its app: if the app didn't take that size in both
+    /// directions, it goes back.
+    private func verifyForcedZoom(_ id: CGWindowID) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(settings.animationDuration, 0.2) + 0.4) { [weak self] in
+            guard let self, let w = self.windows[id] ?? self.floating[id] else { return }
+            let element = w.element
+            self.writer.perform(pid: w.pid) {
+                let actual = AX.frame(element)
+                DispatchQueue.main.async {
+                    guard let actual, let screen = Geometry.screen(containingAX: CGPoint(x: actual.midX, y: actual.midY)) else { return }
+                    let target = self.fullScreenFrame(screen)
+                    let fits = abs(actual.width - target.width) <= 4 && abs(actual.height - target.height) <= 4
+                    if fits { return }
+                    if self.isMaximized(id) {
+                        Log.info("\(w.appName) won't fill the screen (\(Int(actual.width))x\(Int(actual.height))); back")
+                        self.setMaximized(id, false)
+                    } else if self.forcedZoom.contains(id) {
+                        Log.info("\(w.appName) won't fill the screen (\(Int(actual.width))x\(Int(actual.height))); back")
+                        self.unzoom(id)
+                    }
+                }
+            }
+        }
     }
 
     private func floatingZoomClick(_ id: CGWindowID, before: CGRect) {
@@ -3313,10 +3347,12 @@ final class WindowManager {
             guard let self, let w = self.floating[id] else { return }
             let element = w.element
             self.writer.perform(pid: w.pid) {
-                let actual = AX.frame(element)
+                let actual = AX.frame(element), own = Self.drawsOwnTitleBar(element)
                 DispatchQueue.main.async {
                     guard let actual, self.floating[id] != nil else { return }
-                    if self.appZoomed[id] != nil {
+                    if self.forcedZoom.contains(id) {
+                        self.unzoom(id)
+                    } else if self.appZoomed[id] != nil {
                         // A double click near the top that didn't unzoom it (Blender's own
                         // header is there) keeps it zoomed.
                         let zoomed = self.floating[id]?.zoomedFrame ?? actual
@@ -3328,6 +3364,16 @@ final class WindowManager {
                         self.appZoomed[id] = before
                         self.floating[id]?.zoomedFrame = actual
                         Log.info("app zoomed floating \(id)")
+                    } else if own, let screen = Geometry.screen(containingAX: CGPoint(x: actual.midX, y: actual.midY)) {
+                        let target = self.fullScreenFrame(screen)
+                        self.appZoomed[id] = actual
+                        self.floating[id]?.zoomedFrame = target
+                        self.floating[id]?.lastFrame = target
+                        self.forcedZoom.insert(id)
+                        self.dockPlacedAt[id] = CACurrentMediaTime()
+                        self.writer.move(id, pid: w.pid, element: element, to: target, setSize: true)
+                        Log.info("zoomed floating \(id) \(w.appName) for its app")
+                        self.verifyForcedZoom(id)
                     }
                 }
             }
@@ -3337,6 +3383,7 @@ final class WindowManager {
     /// Puts an app-zoomed floating window back where it was, shrinking it there over
     /// `animationDuration` (a slow app just shows fewer of the steps).
     private func unzoom(_ id: CGWindowID) {
+        forcedZoom.remove(id)
         guard let before = appZoomed.removeValue(forKey: id), let w = floating[id] else { return }
         Log.info("unzoom floating \(id) \(w.appName)")
         let duration = settings.animationDuration > 0 ? max(settings.animationDuration, 0.25) : 0
@@ -3384,25 +3431,35 @@ final class WindowManager {
         }
         guard ids.contains(wid), let w = windows[wid], let frame = w.lastFrame, !w.parked,
               p.y - frame.minY <= 56, let (key, _) = locate(wid) else { return }
-        zoomClick = (wid, key, frame)
+        // Where it really was (an app that can't get as small as its tile is bigger).
+        let real = clickedFloating.flatMap { $0.id == wid ? $0.frame : nil } ?? frame
+        zoomClick = (wid, key, real)
         // Give the app time to zoom, then read where the window ended up.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
             guard let self, let w = self.windows[wid] else { self?.zoomClick = nil; return }
             let element = w.element
             self.writer.perform(pid: w.pid) {
-                let actual = AX.frame(element)
-                DispatchQueue.main.async { self.finishZoomClick(wid, actual) }
+                let actual = AX.frame(element), own = Self.drawsOwnTitleBar(element)
+                DispatchQueue.main.async { self.finishZoomClick(wid, actual, ownTitleBar: own) }
             }
         }
     }
 
-    private func finishZoomClick(_ id: CGWindowID, _ actual: CGRect?) {
+    private func finishZoomClick(_ id: CGWindowID, _ actual: CGRect?, ownTitleBar: Bool) {
         guard let zc = zoomClick, zc.id == id else { return }
         zoomClick = nil
         guard let actual, windows[id] != nil else { return }
         let resized = abs(actual.width - zc.frame.width) > 20 || abs(actual.height - zc.frame.height) > 20
         let isMax = isMaximized(id)
-        if !resized && !isMax { return }  // a double click on a toolbar button, not a zoom
+        if !resized && !isMax {
+            // A title bar of the app's own drawing (Steam) does nothing on a double click: fill
+            // the screen anyway, if the app takes the size. Otherwise it was a toolbar button.
+            if ownTitleBar {
+                setMaximized(id, true)
+                verifyForcedZoom(id)
+            }
+            return
+        }
         // The app moved it somewhere of its own: our next placement must really move it back.
         windows[id]?.lastFrame = actual
         setMaximized(id, !isMax, current: actual)
