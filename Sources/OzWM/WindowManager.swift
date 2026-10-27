@@ -944,9 +944,15 @@ final class WindowManager {
     // MARK: Discovery
 
     private func managedApps() -> [NSRunningApplication] {
-        NSWorkspace.shared.runningApplications.filter {
-            $0.activationPolicy == .regular && $0.processIdentifier != getpid()
-        }
+        NSWorkspace.shared.runningApplications.filter { $0.processIdentifier != getpid() && Self.hasWindows($0) }
+    }
+
+    /// Steam's main window belongs to "Steam Helper", a helper without a Dock icon.
+    static let steamHelper = "com.valvesoftware.steam.helper"
+
+    /// An app whose windows Oz tiles: a regular one (in the Dock), or Steam's helper.
+    static func hasWindows(_ app: NSRunningApplication) -> Bool {
+        app.activationPolicy == .regular || app.bundleIdentifier == steamHelper
     }
 
     private func ensureObserver(_ pid: pid_t) {
@@ -1069,8 +1075,10 @@ final class WindowManager {
 
         // Blender's other windows (preferences, render, editors) look just like its main one;
         // only the main one has "Blender" in its title.
-        let secondary = !probe.main
-            || (w.bundleID == "org.blenderfoundation.blender" && !probe.title.contains("Blender"))
+        // Steam draws its own title bar (no buttons): its main window is the one titled
+        // "Steam"; its menus and notifications are other Steam Helper windows.
+        let secondary = w.bundleID == Self.steamHelper ? probe.title != "Steam"
+            : !probe.main || (w.bundleID == "org.blenderfoundation.blender" && !probe.title.contains("Blender"))
         if let m = minimizedFloating.removeValue(forKey: wid) {
             floating[wid] = w
             if m.manual { manualFloat.insert(wid) }
@@ -1295,7 +1303,7 @@ final class WindowManager {
     }
 
     private func appLaunched(_ app: NSRunningApplication) {
-        guard enabled, app.activationPolicy == .regular else { return }
+        guard enabled, Self.hasWindows(app) else { return }
         let pid = app.processIdentifier
         ensureObserver(pid)
         // The first window often exists before our observer is registered.
@@ -1317,6 +1325,13 @@ final class WindowManager {
         guard enabled else { return }
         // A window picked in the overview: it is closing.
         if overviewActive { overviewClosing() }
+        // Steam shows its window (made hidden at launch, by its helper) without a "window
+        // created": look for it when Steam comes forward.
+        if NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == "com.valvesoftware.steam" {
+            for helper in NSRunningApplication.runningApplications(withBundleIdentifier: Self.steamHelper) {
+                scanApp(helper.processIdentifier, mode: .created)
+            }
+        }
         writer.perform(pid: pid) { [weak self] in
             guard let el = AX.element(AXUIElementCreateApplication(pid), kAXFocusedWindowAttribute) else { return }
             DispatchQueue.main.async { self?.focusChanged(el) }
