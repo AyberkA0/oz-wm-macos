@@ -2341,7 +2341,16 @@ final class WindowManager {
         let target = settings.swipe.snap == .always
             ? nextWindow(strip, from: from, dir, vh: vh)
             : strip.clampScroll(from + CGFloat(dir) * vh / 2, viewportHeight: vh, gap: settings.gap)
-        guard abs(target - from) > 0.5 else { return }
+        guard abs(target - from) > 0.5 else {
+            // Nowhere to go: give a little that way and spring back, like a swipe past the end.
+            // A spring from rest at the target, pushed off at this speed, swings out about
+            // 0.46 x speed / omega (here 3% of the screen) and comes back.
+            guard animations[key] == nil else { return }
+            let speed = vh * 0.03 * Animation.Spring.omega / 0.46
+            let sp = Animation.Spring(x0: 0, v0: Double(dir > 0 ? speed : -speed))
+            animate(key, duration: sp.duration, spring: sp)
+            return
+        }
         strip.scrollY = target
         animate(key, duration: max(settings.animationDuration * 1.5, 0.25))
     }
