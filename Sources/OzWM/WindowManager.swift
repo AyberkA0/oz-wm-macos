@@ -1287,7 +1287,12 @@ final class WindowManager {
     private func focusChanged(_ el: AXUIElement) {
         // No round trip to the app here (a busy app stalled this for 200 ms): a window we
         // don't recognise by element is one we don't manage yet anyway.
-        guard enabled, let pid = AX.pid(el), let w = find(el, pid: pid, askApp: false) else { return }
+        guard enabled, let pid = AX.pid(el), pid != getpid() else { return }
+        guard let w = find(el, pid: pid, askApp: false) else {
+            restoreMaximized(focusing: el, pid: pid)
+            return
+        }
+        restoreMaximized(focusing: w)
         trackedFocus = w.id
         guard gesture == nil, windows[w.id] != nil, let (key, strip) = locate(w.id) else { return }
         let wid = w.id
@@ -3179,6 +3184,35 @@ final class WindowManager {
         w.needsSizeCheck = false
         Log.debug("\(on ? "maximize" : "restore") \(id) \(w.appName)")
         relayout(key, animated: true)
+    }
+
+    /// Another window got focus (Dock, ⌘Tab, a click): a window filling its screen goes back
+    /// into the strip.
+    private func restoreMaximized(focusing w: ManagedWindow) {
+        if let (key, _) = locate(w.id) {
+            if let id = maximizedID(key), id != w.id { setMaximized(id, false) }
+            return
+        }
+        guard let frame = w.lastFrame else { return }
+        restoreMaximized(at: frame, except: nil)
+    }
+
+    /// The same for a window Oz doesn't manage; a dialog of the full-screen window's own app
+    /// (a save panel, say) leaves it as it is.
+    private func restoreMaximized(focusing el: AXUIElement, pid: pid_t) {
+        guard maximized.values.contains(where: { windows[$0].map { $0.pid != pid } ?? false }) else { return }
+        writer.perform(pid: pid) { [weak self] in
+            guard let frame = AX.frame(el) else { return }
+            DispatchQueue.main.async { self?.restoreMaximized(at: frame, except: pid) }
+        }
+    }
+
+    private func restoreMaximized(at frame: CGRect, except pid: pid_t?) {
+        let center = CGPoint(x: frame.midX, y: frame.midY)
+        for (key, screen) in visibleKeys() where Geometry.ax(screen.frame).contains(center) {
+            guard let id = maximizedID(key), let m = windows[id], m.pid != pid else { continue }
+            setMaximized(id, false)
+        }
     }
 
     /// A double click on a tiled window's title bar makes macOS zoom it (or minimize it,
