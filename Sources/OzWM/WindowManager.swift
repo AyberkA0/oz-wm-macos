@@ -47,7 +47,8 @@ struct WindowProbe {
     let manageable: Bool
     let resizable: Bool
     /// An app's main window rather than a popup, alert or splash screen: it has a close
-    /// button and can be zoomed or made full screen, and doesn't block its app.
+    /// button, can be made full screen (an app's secondary windows, like Blender's
+    /// preferences or render window, only zoom) and doesn't block its app.
     let main: Bool
     let title: String
 
@@ -59,8 +60,7 @@ struct WindowProbe {
             && AX.bool(el, "AXFullScreen") != true
         let resizable = manageable && AX.isSettable(el, kAXSizeAttribute) && AX.isSettable(el, kAXPositionAttribute)
         let main = manageable && AX.element(el, kAXCloseButtonAttribute) != nil
-            && (AX.element(el, kAXZoomButtonAttribute).flatMap { AX.bool($0, kAXEnabledAttribute) } == true
-                || AX.element(el, "AXFullScreenButton") != nil)
+            && AX.element(el, "AXFullScreenButton") != nil
             && AX.bool(el, kAXModalAttribute) != true
         return WindowProbe(element: el, pid: pid, id: wid, frame: AX.frame(el), manageable: manageable,
                            resizable: resizable, main: main, title: manageable ? AX.string(el, kAXTitleAttribute) ?? "" : "")
@@ -245,6 +245,12 @@ final class WindowManager {
     private var saveTimer: Timer?
     /// A double click just landed on this window's title bar; its app may zoom it.
     private var zoomClick: (id: CGWindowID, key: StripKey, frame: CGRect)?
+    /// Floating and docked windows their app zoomed (title bar double click), with where
+    /// they were before: put back there once another window gets focus.
+    private var appZoomed: [CGWindowID: CGRect] = [:]
+    /// The floating window under the last single click and where it was: by the time Oz sees
+    /// a double click (a global event, after the app's), its app may have zoomed it already.
+    private var clickedFloating: (id: CGWindowID, frame: CGRect)?
     /// Floating windows the user took out of the strip (dragged out of the scroll area, a
     /// tab torn off outside it, toggleFloat): dropping one into a scroll area tiles it again.
     /// Windows floating because of a rule or a fixed size are not in here.
@@ -1056,8 +1062,12 @@ final class WindowManager {
         ensureObserver(pid)
         observers[pid]?.watch(window: el)
 
-        if rule.float || !probe.resizable || !probe.main {
-            if !probe.main { Log.debug("float \(wid) \(w.appName) '\(w.title)': not a main window") }
+        // Blender's other windows (preferences, render, editors) look just like its main one;
+        // only the main one has "Blender" in its title.
+        let secondary = !probe.main
+            || (w.bundleID == "org.blenderfoundation.blender" && !probe.title.contains("Blender"))
+        if rule.float || !probe.resizable || secondary {
+            if secondary { Log.info("float \(wid) \(w.appName) '\(w.title)': not a main window") }
             floating[wid] = w
             emit?("windowCreated", info(w))
             return
@@ -1322,7 +1332,7 @@ final class WindowManager {
         // Pressing on a gliding strip stops it where it is (like touching a scrolling list),
         // so the window under the cursor doesn't move while it's held.
         stopGlide(at: p)
-        if doubleClick { titleBarDoubleClick(at: p) }
+        if doubleClick { titleBarDoubleClick(at: p) } else { clickedFloating = floatingWindow(at: p) }
     }
 
     private func mouseWentUp() {
@@ -3197,6 +3207,7 @@ final class WindowManager {
     /// Another window got focus (Dock, ⌘Tab, a click): a window filling its screen goes back
     /// into the strip.
     private func restoreMaximized(focusing w: ManagedWindow) {
+        for id in appZoomed.keys where id != w.id { unzoom(id) }
         if let (key, _) = locate(w.id) {
             if let id = maximizedID(key), id != w.id { setMaximized(id, false) }
             return
@@ -3208,7 +3219,8 @@ final class WindowManager {
     /// The same for a window Oz doesn't manage; a dialog of the full-screen window's own app
     /// (a save panel, say) leaves it as it is.
     private func restoreMaximized(focusing el: AXUIElement, pid: pid_t) {
-        guard maximized.values.contains(where: { windows[$0].map { $0.pid != pid } ?? false }) else { return }
+        guard maximized.values.contains(where: { windows[$0].map { $0.pid != pid } ?? false })
+              || appZoomed.keys.contains(where: { floating[$0].map { $0.pid != pid } ?? false }) else { return }
         writer.perform(pid: pid) { [weak self] in
             guard let frame = AX.frame(el) else { return }
             DispatchQueue.main.async { self?.restoreMaximized(at: frame, except: pid) }
@@ -3217,10 +3229,60 @@ final class WindowManager {
 
     private func restoreMaximized(at frame: CGRect, except pid: pid_t?) {
         let center = CGPoint(x: frame.midX, y: frame.midY)
+        for (id, before) in appZoomed {
+            guard let w = floating[id] else { appZoomed[id] = nil; continue }
+            guard w.pid != pid, Geometry.ax(Geometry.screen(containingAX: CGPoint(x: before.midX, y: before.midY))?.frame ?? .zero)
+                .contains(center) else { continue }
+            unzoom(id)
+        }
         for (key, screen) in visibleKeys() where Geometry.ax(screen.frame).contains(center) {
             guard let id = maximizedID(key), let m = windows[id], m.pid != pid else { continue }
             setMaximized(id, false)
         }
+    }
+
+    /// A floating or docked window's title bar was double clicked: if its app zooms it,
+    /// remember where it was; if it unzooms it, forget.
+    private func floatingWindow(at p: CGPoint) -> (id: CGWindowID, frame: CGRect)? {
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        for info in list {
+            guard (info[kCGWindowLayer as String] as? Int) == 0, (info[kCGWindowOwnerPID as String] as? pid_t) != getpid(),
+                  let b = info[kCGWindowBounds as String] else { continue }
+            var r = CGRect.zero
+            CGRectMakeWithDictionaryRepresentation(b as! CFDictionary, &r)
+            guard r.contains(p) else { continue }
+            guard let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value, floating[id] != nil else { return nil }
+            return (id, r)
+        }
+        return nil
+    }
+
+    private func floatingZoomClick(_ id: CGWindowID, before: CGRect) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self, let w = self.floating[id] else { return }
+            let element = w.element
+            self.writer.perform(pid: w.pid) {
+                let actual = AX.frame(element)
+                DispatchQueue.main.async {
+                    guard let actual, self.floating[id] != nil else { return }
+                    if self.appZoomed[id] != nil {
+                        self.appZoomed[id] = nil
+                    } else if actual.width * actual.height > before.width * before.height + 400 * 20 {
+                        self.appZoomed[id] = before
+                        Log.info("app zoomed floating \(id)")
+                    }
+                }
+            }
+        }
+    }
+
+    private func unzoom(_ id: CGWindowID) {
+        guard let before = appZoomed.removeValue(forKey: id), let w = floating[id] else { return }
+        dockPlacedAt[id] = CACurrentMediaTime()
+        writer.move(id, pid: w.pid, element: w.element, to: before, setSize: true)
+        w.lastFrame = before
+        Log.info("unzoom floating \(id) \(w.appName)")
     }
 
     /// A double click on a tiled window's title bar makes macOS zoom it (or minimize it,
@@ -3239,8 +3301,12 @@ final class WindowManager {
             var r = CGRect.zero
             CGRectMakeWithDictionaryRepresentation(b as! CFDictionary, &r)
             return r.contains(p)
-        }), let wid = (hit[kCGWindowNumber as String] as? NSNumber)?.uint32Value, ids.contains(wid),
-              let w = windows[wid], let frame = w.lastFrame, !w.parked,
+        }), let wid = (hit[kCGWindowNumber as String] as? NSNumber)?.uint32Value else { return }
+        if floating[wid] != nil {
+            if let c = clickedFloating, c.id == wid, p.y - c.frame.minY <= 56 { floatingZoomClick(wid, before: c.frame) }
+            return
+        }
+        guard ids.contains(wid), let w = windows[wid], let frame = w.lastFrame, !w.parked,
               p.y - frame.minY <= 56, let (key, _) = locate(wid) else { return }
         zoomClick = (wid, key, frame)
         // Give the app time to zoom, then read where the window ended up.
