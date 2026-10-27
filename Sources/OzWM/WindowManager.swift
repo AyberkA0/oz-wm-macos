@@ -3269,7 +3269,13 @@ final class WindowManager {
                 DispatchQueue.main.async {
                     guard let actual, self.floating[id] != nil else { return }
                     if self.appZoomed[id] != nil {
-                        self.appZoomed[id] = nil
+                        // A double click near the top that didn't unzoom it (Blender's own
+                        // header is there) keeps it zoomed.
+                        let zoomed = self.floating[id]?.zoomedFrame ?? actual
+                        if actual.width * actual.height < zoomed.width * zoomed.height - 400 * 20 {
+                            self.appZoomed[id] = nil
+                            Log.info("app unzoomed floating \(id)")
+                        }
                     } else if actual.width * actual.height > before.width * before.height + 400 * 20 {
                         self.appZoomed[id] = before
                         self.floating[id]?.zoomedFrame = actual
