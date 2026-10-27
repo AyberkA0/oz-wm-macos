@@ -1,6 +1,6 @@
 import Cocoa
 
-let version = "0.3.1beta"
+let version = "0.3.2beta"
 
 let args = Array(CommandLine.arguments.dropFirst())
 switch args.first {
