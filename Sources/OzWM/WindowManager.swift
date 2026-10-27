@@ -15,6 +15,8 @@ final class ManagedWindow {
     let bundleID: String?
     /// Last frame we applied (AX coordinates).
     var lastFrame: CGRect?
+    /// Where its app put it when zooming it (floating windows).
+    var zoomedFrame: CGRect?
     var parked = false
     var shrunk = false
     /// Its size was changed since the last settle (the app may have refused it).
@@ -3270,6 +3272,7 @@ final class WindowManager {
                         self.appZoomed[id] = nil
                     } else if actual.width * actual.height > before.width * before.height + 400 * 20 {
                         self.appZoomed[id] = before
+                        self.floating[id]?.zoomedFrame = actual
                         Log.info("app zoomed floating \(id)")
                     }
                 }
@@ -3277,12 +3280,31 @@ final class WindowManager {
         }
     }
 
+    /// Puts an app-zoomed floating window back where it was, shrinking it there over
+    /// `animationDuration` (a slow app just shows fewer of the steps).
     private func unzoom(_ id: CGWindowID) {
         guard let before = appZoomed.removeValue(forKey: id), let w = floating[id] else { return }
-        dockPlacedAt[id] = CACurrentMediaTime()
-        writer.move(id, pid: w.pid, element: w.element, to: before, setSize: true)
-        w.lastFrame = before
         Log.info("unzoom floating \(id) \(w.appName)")
+        let duration = settings.animationDuration > 0 ? max(settings.animationDuration, 0.25) : 0
+        guard duration > 0, let from = w.zoomedFrame ?? w.lastFrame, !from.approxEqual(before) else {
+            dockPlacedAt[id] = CACurrentMediaTime()
+            writer.move(id, pid: w.pid, element: w.element, to: before, setSize: true)
+            w.lastFrame = before
+            return
+        }
+        let start = CACurrentMediaTime()
+        Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+            guard let self, self.floating[id] === w, self.appZoomed[id] == nil else { return timer.invalidate() }
+            let t = min(1, (CACurrentMediaTime() - start) / duration)
+            let e = CGFloat(1 - pow(1 - t, 3))  // ease out
+            let f = CGRect(x: from.minX + (before.minX - from.minX) * e, y: from.minY + (before.minY - from.minY) * e,
+                           width: from.width + (before.width - from.width) * e,
+                           height: from.height + (before.height - from.height) * e).integral
+            self.dockPlacedAt[id] = CACurrentMediaTime()
+            self.writer.move(id, pid: w.pid, element: w.element, to: t < 1 ? f : before, setSize: true)
+            w.lastFrame = t < 1 ? f : before
+            if t >= 1 { timer.invalidate() }
+        }
     }
 
     /// A double click on a tiled window's title bar makes macOS zoom it (or minimize it,
