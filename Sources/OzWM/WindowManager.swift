@@ -250,6 +250,9 @@ final class WindowManager {
     /// Floating and docked windows their app zoomed (title bar double click), with where
     /// they were before: put back there once another window gets focus.
     private var appZoomed: [CGWindowID: CGRect] = [:]
+    /// Floating and docked windows sent to the Dock: brought back, they go back there (the
+    /// region and place they had) rather than into the strip.
+    private var minimizedFloating: [CGWindowID: (manual: Bool, dock: (key: StripKey, region: Int, index: Int)?)] = [:]
     /// The floating window under the last single click and where it was: by the time Oz sees
     /// a double click (a global event, after the app's), its app may have zoomed it already.
     private var clickedFloating: (id: CGWindowID, frame: CGRect)?
@@ -1068,6 +1071,20 @@ final class WindowManager {
         // only the main one has "Blender" in its title.
         let secondary = !probe.main
             || (w.bundleID == "org.blenderfoundation.blender" && !probe.title.contains("Blender"))
+        if let m = minimizedFloating.removeValue(forKey: wid) {
+            floating[wid] = w
+            if m.manual { manualFloat.insert(wid) }
+            if let d = m.dock {
+                var list = (docks[d.key]?[d.region] ?? []).filter { floating[$0] != nil }
+                list.insert(wid, at: min(d.index, list.count))
+                docks[d.key, default: [:]][d.region] = list
+                layoutDocks(d.key)
+                checkDocked(w, key: d.key)
+            }
+            Log.debug("\(wid) \(w.appName) back from the Dock, floating\(m.dock != nil ? " (docked)" : "")")
+            emit?("windowCreated", info(w))
+            return
+        }
         if rule.float || !probe.resizable || secondary {
             if secondary { Log.info("float \(wid) \(w.appName) '\(w.title)': not a main window") }
             floating[wid] = w
@@ -1210,7 +1227,9 @@ final class WindowManager {
         case kAXUIElementDestroyedNotification:
             if let w = find(element, pid: pid, askApp: false) { unmanage(w.id, focusNeighbor: true) }
         case kAXWindowMiniaturizedNotification:
-            if let w = find(element, pid: pid, askApp: false) { unmanage(w.id, focusNeighbor: true) }
+            guard let w = find(element, pid: pid, askApp: false) else { return }
+            if floating[w.id] != nil { rememberMinimized(w.id) }
+            unmanage(w.id, focusNeighbor: true)
         case kAXWindowMovedNotification, kAXWindowResizedNotification:
             // While scrolling these are our own moves, dozens per second: skip the lookup.
             guard !isMoving, let w = find(element, pid: pid) else { return }
@@ -1583,6 +1602,16 @@ final class WindowManager {
     }
 
     // MARK: Dragging in and out of the scroll area
+
+    private func rememberMinimized(_ id: CGWindowID) {
+        var dock: (key: StripKey, region: Int, index: Int)?
+        for (key, regions) in docks {
+            for (i, ids) in regions {
+                if let j = ids.firstIndex(of: id) { dock = (key, i, j) }
+            }
+        }
+        minimizedFloating[id] = (manualFloat.contains(id), dock)
+    }
 
     private func forgetFloating(_ id: CGWindowID) {
         undock(id)
