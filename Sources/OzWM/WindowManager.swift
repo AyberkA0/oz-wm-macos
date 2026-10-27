@@ -3320,7 +3320,7 @@ final class WindowManager {
     /// A window Oz made fill the screen for its app: if the app didn't take that size in both
     /// directions, it goes back.
     private func verifyForcedZoom(_ id: CGWindowID) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + max(settings.animationDuration, 0.2) + 0.4) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(settings.animationDuration, floatingAnimationDuration) + 0.4) { [weak self] in
             guard let self, let w = self.windows[id] ?? self.floating[id] else { return }
             let element = w.element
             self.writer.perform(pid: w.pid) {
@@ -3368,10 +3368,8 @@ final class WindowManager {
                         let target = self.fullScreenFrame(screen)
                         self.appZoomed[id] = actual
                         self.floating[id]?.zoomedFrame = target
-                        self.floating[id]?.lastFrame = target
                         self.forcedZoom.insert(id)
-                        self.dockPlacedAt[id] = CACurrentMediaTime()
-                        self.writer.move(id, pid: w.pid, element: element, to: target, setSize: true)
+                        self.animateFloating(w, from: actual, to: target) { [weak self] in self?.forcedZoom.contains(id) == true }
                         Log.info("zoomed floating \(id) \(w.appName) for its app")
                         self.verifyForcedZoom(id)
                     }
@@ -3386,24 +3384,35 @@ final class WindowManager {
         forcedZoom.remove(id)
         guard let before = appZoomed.removeValue(forKey: id), let w = floating[id] else { return }
         Log.info("unzoom floating \(id) \(w.appName)")
-        let duration = settings.animationDuration > 0 ? max(settings.animationDuration, 0.25) : 0
-        guard duration > 0, let from = w.zoomedFrame ?? w.lastFrame, !from.approxEqual(before) else {
+        animateFloating(w, from: w.zoomedFrame ?? w.lastFrame, to: before) { [weak self] in self?.appZoomed[id] == nil }
+    }
+
+    /// How long a floating window takes to grow or shrink (a slow app just shows fewer steps).
+    private var floatingAnimationDuration: Double {
+        settings.animationDuration > 0 ? max(settings.animationDuration, 0.25) : 0
+    }
+
+    /// Moves a floating window from `from` to `to` over `floatingAnimationDuration`, while
+    /// `still()` holds (it stops if the window is zoomed or unzoomed again meanwhile).
+    private func animateFloating(_ w: ManagedWindow, from: CGRect?, to: CGRect, still: @escaping () -> Bool) {
+        let id = w.id, duration = floatingAnimationDuration
+        guard duration > 0, let from, !from.approxEqual(to) else {
             dockPlacedAt[id] = CACurrentMediaTime()
-            writer.move(id, pid: w.pid, element: w.element, to: before, setSize: true)
-            w.lastFrame = before
+            writer.move(id, pid: w.pid, element: w.element, to: to, setSize: true)
+            w.lastFrame = to
             return
         }
         let start = CACurrentMediaTime()
         Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
-            guard let self, self.floating[id] === w, self.appZoomed[id] == nil else { return timer.invalidate() }
+            guard let self, self.floating[id] === w, still() else { return timer.invalidate() }
             let t = min(1, (CACurrentMediaTime() - start) / duration)
             let e = CGFloat(1 - pow(1 - t, 3))  // ease out
-            let f = CGRect(x: from.minX + (before.minX - from.minX) * e, y: from.minY + (before.minY - from.minY) * e,
-                           width: from.width + (before.width - from.width) * e,
-                           height: from.height + (before.height - from.height) * e).integral
+            let f = CGRect(x: from.minX + (to.minX - from.minX) * e, y: from.minY + (to.minY - from.minY) * e,
+                           width: from.width + (to.width - from.width) * e,
+                           height: from.height + (to.height - from.height) * e).integral
             self.dockPlacedAt[id] = CACurrentMediaTime()
-            self.writer.move(id, pid: w.pid, element: w.element, to: t < 1 ? f : before, setSize: true)
-            w.lastFrame = t < 1 ? f : before
+            self.writer.move(id, pid: w.pid, element: w.element, to: t < 1 ? f : to, setSize: true)
+            w.lastFrame = t < 1 ? f : to
             if t >= 1 { timer.invalidate() }
         }
     }
