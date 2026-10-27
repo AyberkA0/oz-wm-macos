@@ -413,7 +413,8 @@ private final class Board {
                               backing: .buffered, defer: false)
         window.isOpaque = false
         window.backgroundColor = .clear
-        window.hasShadow = false
+        // macOS's own window shadow, worked out from the pictures on it (see `shadowChanged`).
+        window.hasShadow = true
         window.ignoresMouseEvents = true
         window.level = .normal
         window.isReleasedWhenClosed = false
@@ -448,6 +449,22 @@ private final class Board {
     }
 
     var isEmpty: Bool { root.sublayers?.isEmpty ?? true }
+
+    /// The pictures moved since the shadow was last worked out.
+    var shadowStale = false
+    /// The window server works a window's shadow out from its content only when asked: ask
+    /// at the end of the frame (`OverlayManager.flushShadows`), or soon if no frame follows.
+    func shadowChanged() {
+        guard !shadowStale else { return }
+        shadowStale = true
+        DispatchQueue.main.async { [weak self] in self?.flushShadow() }
+    }
+
+    func flushShadow() {
+        guard shadowStale else { return }
+        shadowStale = false
+        window.invalidateShadow()
+    }
 
     /// In front of the windows (or just below one being dragged). `again`: windows may have
     /// come forward since (an app activated), so order it even if nothing changed.
@@ -512,7 +529,8 @@ final class OverlayManager {
                              backing: .buffered, defer: false)
             window.isOpaque = false
             window.backgroundColor = .clear
-            window.hasShadow = false
+            // macOS's own window shadow, from the picture's shape (rounded corners and all).
+            window.hasShadow = true
             window.ignoresMouseEvents = true
             window.alphaValue = 0
             window.level = .normal
@@ -536,7 +554,11 @@ final class OverlayManager {
             window.contentView = view
         }
 
+        /// The picture changed since the window shadow was last worked out.
+        var shadowStale = true
+
         func setImage(_ image: CGImage?) {
+            if (image?.width, image?.height) != (self.image?.width, self.image?.height) { shadowStale = true }
             self.image = image
             imageLayer.contents = image
             boardImage.contents = image
@@ -679,6 +701,7 @@ final class OverlayManager {
             o.boardClip.frame = b.local(visible)
             if first { b.cover(true) }
             b.order(below: below, again: first)
+            b.shadowChanged()
             if o.inWindow {
                 // Moving on: the window's copy goes (the board's is already up, this commit).
                 o.inWindow = false
@@ -689,8 +712,14 @@ final class OverlayManager {
         }
         o.imageLayer.contentsScale = o.window.backingScaleFactor
         // Layer-backed content: no need to force a synchronous redraw every frame.
-        o.window.setFrame(NSRect(x: full.minX, y: Geometry.primaryHeight - bottom, width: full.width, height: bottom - top),
-                          display: false)
+        let frame = NSRect(x: full.minX, y: Geometry.primaryHeight - bottom, width: full.width, height: bottom - top)
+        if o.window.frame.size != frame.size { o.shadowStale = true }
+        o.window.setFrame(frame, display: false)
+        if o.shadowStale || !o.inWindow {
+            // Worked out once this commit is out (from an empty window it would stay missing).
+            o.shadowStale = false
+            DispatchQueue.main.async { [weak o] in o?.window.invalidateShadow() }
+        }
         if !o.inWindow {
             o.inWindow = true
             o.window.alphaValue = 1
@@ -713,6 +742,7 @@ final class OverlayManager {
                     o.boardClip.removeFromSuperlayer()
                     CATransaction.commit()
                     o.board = nil
+                    b?.shadowChanged()
                     if let b, b.isEmpty { b.cover(false) }
                 }
             }
@@ -721,6 +751,15 @@ final class OverlayManager {
             o.window.order(.below, relativeTo: Int(below))
             o.orderedBelow = below
         }
+    }
+
+    /// End of a frame: the boards' pictures are where they go, so send them to the screen now
+    /// and have their shadows worked out from that, in the same frame as the pictures (asked
+    /// later, the shadow was worked out from a half-drawn board and flickered).
+    func flushShadows() {
+        guard boards.values.contains(where: { $0.shadowStale }) else { return }
+        CATransaction.flush()
+        for b in boards.values { b.flushShadow() }
     }
 
     /// Stops every live stream but keeps the stand-ins (with their last frame) in place, e.g.
@@ -840,6 +879,7 @@ final class OverlayManager {
         o.boardClip.opacity = 1
         o.setImage(nil)
         CATransaction.commit()
+        o.board?.shadowChanged()
         if let b = o.board, b.isEmpty { b.cover(false) }
         o.board = nil
         if o.inWindow {
@@ -863,6 +903,7 @@ final class OverlayManager {
         pendingHide.removeValue(forKey: id)?.cancel()
         stopLive(o)
         o.boardClip.removeFromSuperlayer()
+        o.board?.shadowChanged()
         if let b = o.board, b.isEmpty { b.cover(false) }
         o.window.orderOut(nil)
     }

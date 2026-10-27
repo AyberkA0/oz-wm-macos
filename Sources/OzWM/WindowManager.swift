@@ -2462,6 +2462,7 @@ final class WindowManager {
             updateScrollIndicator(key, strip: strip, screen: screen)
         }
         dirty.removeAll()
+        overlays.flushShadows()
         for key in finished {
             FrameStats.report("animation")
             if let id = pendingActivation.removeValue(forKey: key), let w = windows[id] ?? floating[id] {
