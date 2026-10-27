@@ -46,6 +46,9 @@ struct WindowProbe {
     /// A standard, visible (not minimized / not fullscreen) window.
     let manageable: Bool
     let resizable: Bool
+    /// An app's main window rather than a popup, alert or splash screen: it has a close
+    /// button and can be zoomed or made full screen, and doesn't block its app.
+    let main: Bool
     let title: String
 
     static func read(_ el: AXUIElement, pid: pid_t) -> WindowProbe? {
@@ -55,8 +58,12 @@ struct WindowProbe {
             && AX.bool(el, kAXMinimizedAttribute) != true
             && AX.bool(el, "AXFullScreen") != true
         let resizable = manageable && AX.isSettable(el, kAXSizeAttribute) && AX.isSettable(el, kAXPositionAttribute)
+        let main = manageable && AX.element(el, kAXCloseButtonAttribute) != nil
+            && (AX.element(el, kAXZoomButtonAttribute).flatMap { AX.bool($0, kAXEnabledAttribute) } == true
+                || AX.element(el, "AXFullScreenButton") != nil)
+            && AX.bool(el, kAXModalAttribute) != true
         return WindowProbe(element: el, pid: pid, id: wid, frame: AX.frame(el), manageable: manageable,
-                           resizable: resizable, title: manageable ? AX.string(el, kAXTitleAttribute) ?? "" : "")
+                           resizable: resizable, main: main, title: manageable ? AX.string(el, kAXTitleAttribute) ?? "" : "")
     }
 
     static func readApp(_ pid: pid_t) -> [WindowProbe] {
@@ -1049,7 +1056,8 @@ final class WindowManager {
         ensureObserver(pid)
         observers[pid]?.watch(window: el)
 
-        if rule.float || !probe.resizable {
+        if rule.float || !probe.resizable || !probe.main {
+            if !probe.main { Log.debug("float \(wid) \(w.appName) '\(w.title)': not a main window") }
             floating[wid] = w
             emit?("windowCreated", info(w))
             return
