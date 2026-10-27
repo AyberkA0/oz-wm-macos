@@ -258,8 +258,6 @@ final class WindowManager {
     private var clickedFloating: (id: CGWindowID, frame: CGRect)?
     /// Floating windows Oz made fill the screen itself (their app ignored the double click).
     private var forcedZoom: Set<CGWindowID> = []
-    /// Where and when the mouse button last went down (kept after it comes up).
-    private var lastMouseDown: (point: CGPoint, at: CFTimeInterval)?
     /// Floating windows the user took out of the strip (dragged out of the scroll area, a
     /// tab torn off outside it, toggleFloat): dropping one into a scroll area tiles it again.
     /// Windows floating because of a rule or a fixed size are not in here.
@@ -1369,7 +1367,6 @@ final class WindowManager {
         let m = NSEvent.mouseLocation
         let p = CGPoint(x: m.x, y: Geometry.primaryHeight - m.y)
         mouseDownAt = p
-        lastMouseDown = (p, CACurrentMediaTime())
         revealOnMouseUp = nil
         // Pressing on a gliding strip stops it where it is (like touching a scrolling list),
         // so the window under the cursor doesn't move while it's held.
@@ -1515,7 +1512,7 @@ final class WindowManager {
             if !actual.approxEqual(expected, tolerance: 3), let (key, _) = locate(w.id) {
                 let byUser = (userDragged[w.id].map { now - $0 < 3 } ?? false)
                     || (userResized[w.id].map { now - $0 < 3 } ?? false)
-                if !byUser && !fillsScreen(actual) && !greenButtonClick(near: expected) {
+                if !byUser && !fillsScreen(actual) {
                     Log.info("\(w.appName) stopped filling the screen; back into the strip")
                     w.lastFrame = actual
                     setMaximized(w.id, false, current: actual)
@@ -1541,12 +1538,22 @@ final class WindowManager {
         // plain move.
         let edgeDragged = (resizedH || resizedW) && (userResized[w.id].map { now - $0 < 3 } ?? false)
         // Made to fill the screen some other way than a title bar double click (Window >
-        // Zoom, a shortcut): the same as one. Not the green button.
-        if !dragged && !edgeDragged && (moved || resizedH || resizedW) && fillsScreen(actual)
-            && !greenButtonClick(near: expected) {
-            Log.info("\(w.appName) filled the screen; maximized")
+        // Zoom, Fill, a shortcut): the same as one. Not macOS full screen, which Oz leaves alone.
+        if !dragged && !edgeDragged && (moved || resizedH || resizedW) && fillsScreen(actual) {
             w.lastFrame = actual
-            setMaximized(w.id, true, current: actual)
+            // Asked a moment later: full screen sets its flag as the window starts growing.
+            let element = w.element
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.writer.perform(pid: w.pid) {
+                    let native = AX.bool(element, "AXFullScreen") == true
+                    DispatchQueue.main.async {
+                        guard let self, !native, self.windows[w.id] === w, !self.isMaximized(w.id),
+                              !Spaces.isFullscreen(Spaces.space(of: w.id) ?? 0) else { return }
+                        Log.info("\(w.appName) filled the screen; maximized")
+                        self.setMaximized(w.id, true, current: actual)
+                    }
+                }
+            }
             return
         }
         // Moved by its title bar (same size): dragging an edge moves the origin too, and must
@@ -3375,14 +3382,6 @@ final class WindowManager {
         }
     }
 
-    /// The window was just clicked at its green button, or in the menu that opens below it
-    /// (Fill, Zoom): that isn't counted as a title bar double click.
-    private func greenButtonClick(near frame: CGRect) -> Bool {
-        guard let d = lastMouseDown, CACurrentMediaTime() - d.at < 2 else { return false }
-        return d.point.x >= frame.minX && d.point.x <= frame.minX + 300
-            && d.point.y >= frame.minY && d.point.y <= frame.minY + 260
-    }
-
     /// Covers (nearly) all of its screen's usable area, the way a zoomed window does.
     private func fillsScreen(_ r: CGRect) -> Bool {
         guard let screen = Geometry.screen(containingAX: CGPoint(x: r.midX, y: r.midY)) else { return false }
@@ -3394,8 +3393,8 @@ final class WindowManager {
         docks.values.contains { $0.values.contains { $0.contains(id) } }
     }
 
-    /// A floating or docked window its app moved or resized (not the user, not Oz, not the
-    /// green button): made to fill the screen, it is treated as zoomed by a double click; no
+    /// A floating or docked window its app moved or resized (not the user, not Oz, not macOS
+    /// full screen): made to fill the screen, it is treated as zoomed by a double click; no
     /// longer filling it, as unzoomed. Otherwise where it is now is where it goes back to after a zoom.
     private func scheduleFloatingZoomCheck(_ w: ManagedWindow) {
         w.frameCheck?.cancel()
@@ -3405,13 +3404,11 @@ final class WindowManager {
             let element = w.element
             self.writer.perform(pid: w.pid) {
                 let actual = AX.frame(element)
+                let native = AX.bool(element, "AXFullScreen") == true
                 DispatchQueue.main.async {
-                    guard let actual, self.floating[id] === w,
+                    guard let actual, !native, self.floating[id] === w,
                           CACurrentMediaTime() - (self.dockPlacedAt[id] ?? 0) > 0.6 else { return }
                     let fills = self.fillsScreen(actual)
-                    if let near = w.lastFrame, self.greenButtonClick(near: self.appZoomed[id] != nil ? actual : near) {
-                        return
-                    }
                     if self.appZoomed[id] == nil {
                         if fills, let before = w.lastFrame, !self.fillsScreen(before) {
                             self.appZoomed[id] = before
