@@ -1520,14 +1520,18 @@ final class WindowManager {
         let moved = abs(actual.minX - expected.minX) > 3 || abs(actual.minY - expected.minY) > 3
         let resizedH = abs(actual.height - expected.height) > 3
         let resizedW = abs(actual.width - expected.width) > 3
+        // Resized by an edge: macOS said so while the button was down. A size that differs
+        // only because the app won't take Oz's (Steam can't get as narrow as its row) is a
+        // plain move.
+        let edgeDragged = (resizedH || resizedW) && (userResized[w.id].map { now - $0 < 3 } ?? false)
         // Moved by its title bar (same size): dragging an edge moves the origin too, and must
         // not take the window out of the strip when the cursor ends up outside the zone.
-        if moved && dragged && !resizedH && !resizedW && isOutsideScrollArea(dropPoint(actual)) {
+        if moved && dragged && !edgeDragged && isOutsideScrollArea(dropPoint(actual)) {
             floatOut(w, at: actual)
             return
         }
         // Dropped elsewhere in its own zone: it moves to the slot the split line showed.
-        if moved && dragged && !resizedH && !resizedW, let zs = zoneSlot(at: dropPoint(actual), dragging: w.id),
+        if moved && dragged && !edgeDragged, let zs = zoneSlot(at: dropPoint(actual), dragging: w.id),
            let (key, strip) = locate(w.id) {
             if zs.key != key {
                 // Another display's zone: it leaves this strip, keeping its row height.
@@ -1551,7 +1555,7 @@ final class WindowManager {
         let vh = viewport(screen).height
         // A narrowed window alone in its row, dropped in that same row: it stays in the row but
         // keeps the sideways place it was dropped at.
-        if moved && dragged && !resizedH && !resizedW, strip.rows[r].windows.count == 1,
+        if moved && dragged && !edgeDragged, strip.rows[r].windows.count == 1,
            strip.widthWeights[w.id] != nil, dropTarget(dropPoint(actual))?.0 == key {
             let (x0, rowWidth) = Strip.rowExtent(params(screen))
             beginTransition(key)
