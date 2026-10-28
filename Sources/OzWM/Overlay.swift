@@ -47,6 +47,13 @@ enum WindowCapture {
         return (factor >= 0.999 ? raw : downscaled(raw, by: factor) ?? raw, points)
     }
 
+    /// The window at its full resolution with its shadow around it, as the window server
+    /// draws it on screen (nil, or without the shadow, while it is off screen).
+    static func withShadow(_ id: CGWindowID) -> CGImage? {
+        var wid = id
+        return (CGSHWCaptureWindowList(connection, &wid, 1, 1) as? [CGImage])?.first
+    }
+
     /// The window size (points) a full-resolution capture shows: its pixels over the backing
     /// scale, which is the screens' common one, or else the whole number closest to pixels /
     /// expected points.
@@ -351,8 +358,25 @@ enum ColorShift {
 /// A stand-in's window: always exactly where it is put. AppKit otherwise pushes a window
 /// that reaches into the menu bar down below it: the picture jumped down, then slid back as
 /// it faded (a flicker).
-private final class StandInPanel: NSPanel {
+final class StandInPanel: NSPanel {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+
+    /// A window with a title bar, which doesn't show: macOS gives it the shadow real windows
+    /// have. A borderless one gets a smaller, lighter one, and a stand-in's shadow shrank and
+    /// grew as the strip moved off the real window and back.
+    static func titled(contentRect: NSRect) -> StandInPanel {
+        let p = StandInPanel(contentRect: contentRect, styleMask: [.titled, .fullSizeContentView, .nonactivatingPanel],
+                             backing: .buffered, defer: false)
+        p.titlebarAppearsTransparent = true
+        p.titleVisibility = .hidden
+        for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            p.standardWindowButton(b)?.isHidden = true
+        }
+        p.isMovable = false
+        return p
+    }
 }
 
 /// The board's content: a click (not a press that turns into a drag) on it.
@@ -413,8 +437,9 @@ private final class Board {
                               backing: .buffered, defer: false)
         window.isOpaque = false
         window.backgroundColor = .clear
-        // macOS's own window shadow, worked out from the pictures on it (see `shadowChanged`).
-        window.hasShadow = true
+        // No window shadow: worked out again from the whole board every frame, it lagged the
+        // pictures and flickered. Each picture has macOS's shadow drawn under it instead.
+        window.hasShadow = false
         window.ignoresMouseEvents = true
         window.level = .normal
         window.isReleasedWhenClosed = false
@@ -450,22 +475,6 @@ private final class Board {
 
     var isEmpty: Bool { root.sublayers?.isEmpty ?? true }
 
-    /// The pictures moved since the shadow was last worked out.
-    var shadowStale = false
-    /// The window server works a window's shadow out from its content only when asked: ask
-    /// at the end of the frame (`OverlayManager.flushShadows`), or soon if no frame follows.
-    func shadowChanged() {
-        guard !shadowStale else { return }
-        shadowStale = true
-        DispatchQueue.main.async { [weak self] in self?.flushShadow() }
-    }
-
-    func flushShadow() {
-        guard shadowStale else { return }
-        shadowStale = false
-        window.invalidateShadow()
-    }
-
     /// In front of the windows (or just below one being dragged). `again`: windows may have
     /// come forward since (an app activated), so order it even if nothing changed.
     func order(below: CGWindowID?, again: Bool = false) {
@@ -493,11 +502,21 @@ final class OverlayManager {
     /// it takes clicks) or on its screen's board (while things move). Both hold a layer with
     /// the same picture, so moving from one to the other never leaves a frame without it.
     private final class Overlay {
+        let id: CGWindowID
         let window: NSPanel
         let imageLayer = CALayer()
-        /// The same picture on a board: a clipping layer (the visible part) holding it.
+        /// The same picture on a board: a clipping layer (the visible part) holding it, over
+        /// its shadow, both in one layer.
+        let boardItem = CALayer()
         let boardClip = CALayer()
         let boardImage = CALayer()
+        let boardShadow = CALayer()
+        /// The shadow made for the picture's shape and size, and the one being made.
+        var shadow: ShadowMaker.Shadow?
+        var shadowWanted: ShadowMaker.Key?
+        /// The shape worked out for pictures of this size (a window's corners don't change;
+        /// working it out again for every live frame cost a hitch).
+        var shapeKey: (size: CGSize, key: ShadowMaker.Key)?
         var image: CGImage?
         var mirror: LiveMirror?
         /// Set once live frames arrive; the still snapshot is no longer drawn.
@@ -521,15 +540,18 @@ final class OverlayManager {
         /// The window it was last ordered just below (a window being dragged), if any.
         var orderedBelow: CGWindowID?
         var fading = false
+        /// The real window is right under it with its own shadow (not parked yet, or back):
+        /// the stand-in has none, or the two would darken each other.
+        var realBelow = false
         /// Snapshot with true on-screen colours, to calibrate the live stream against.
         var reference: CGImage?
 
-        init() {
-            window = StandInPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
-                             backing: .buffered, defer: false)
+        init(id: CGWindowID) {
+            self.id = id
+            window = StandInPanel.titled(contentRect: .zero)
             window.isOpaque = false
             window.backgroundColor = .clear
-            // macOS's own window shadow, from the picture's shape (rounded corners and all).
+            // macOS's own window shadow, the one real windows have (`StandInPanel.titled`).
             window.hasShadow = true
             window.ignoresMouseEvents = true
             window.alphaValue = 0
@@ -548,8 +570,12 @@ final class OverlayManager {
                 layer.actions = still
             }
             boardClip.masksToBounds = true
-            boardClip.actions = ["bounds": NSNull(), "position": NSNull(), "opacity": NSNull()]
+            for layer in [boardItem, boardClip, boardShadow] {
+                layer.actions = ["bounds": NSNull(), "position": NSNull(), "opacity": NSNull(), "contents": NSNull()]
+            }
             boardClip.addSublayer(boardImage)
+            boardItem.addSublayer(boardShadow)
+            boardItem.addSublayer(boardClip)
             view.layer?.addSublayer(imageLayer)
             window.contentView = view
         }
@@ -579,7 +605,7 @@ final class OverlayManager {
             guard let self, let b else { return }
             // The topmost picture there, as clicking that window.
             let hit = self.overlays.first { _, o in
-                o.board === b && o.shown && o.boardClip.superlayer != nil && o.boardClip.frame.contains(p)
+                o.board === b && o.shown && o.boardItem.superlayer != nil && o.boardItem.frame.contains(p)
             }
             if let (id, _) = hit { self.onClick?(id) }
         }
@@ -606,8 +632,8 @@ final class OverlayManager {
                 o.window.animator().alphaValue = o.inWindow ? 1 : 0
             }
             o.window.alphaValue = o.inWindow ? 1 : 0
-            o.boardClip.removeAllAnimations()
-            o.boardClip.opacity = 1
+            o.boardItem.removeAllAnimations()
+            o.boardItem.opacity = 1
         }
         let top = max(clipTop, full.minY)
         let bottom = min(clipBottom, full.maxY)
@@ -617,7 +643,7 @@ final class OverlayManager {
         if let existing = overlays[id] {
             o = existing
         } else {
-            o = Overlay()
+            o = Overlay(id: id)
             (o.window.contentView as? PeekView)?.onClick = { [weak self] in self?.onClick?(id) }
             overlays[id] = o
         }
@@ -692,16 +718,18 @@ final class OverlayManager {
             // The first stand-in of a motion: bring the board forward again.
             let first = b.root.sublayers?.isEmpty ?? true
             if o.board !== b {
-                o.boardClip.removeFromSuperlayer()
-                b.root.addSublayer(o.boardClip)
+                o.boardItem.removeFromSuperlayer()
+                b.root.addSublayer(o.boardItem)
                 o.board = b
             }
-            o.boardClip.opacity = 1
+            o.boardItem.opacity = 1
+            o.boardShadow.isHidden = o.realBelow
             o.boardImage.contentsScale = b.window.backingScaleFactor
-            o.boardClip.frame = b.local(visible)
+            o.boardItem.frame = b.local(visible)
+            o.boardClip.frame = o.boardItem.bounds
+            placeShadow(o)
             if first { b.cover(true) }
             b.order(below: below, again: first)
-            b.shadowChanged()
             if o.inWindow {
                 // Moving on: the window's copy goes (the board's is already up, this commit).
                 o.inWindow = false
@@ -715,6 +743,7 @@ final class OverlayManager {
         let frame = NSRect(x: full.minX, y: Geometry.primaryHeight - bottom, width: full.width, height: bottom - top)
         if o.window.frame.size != frame.size { o.shadowStale = true }
         o.window.setFrame(frame, display: false)
+        if o.window.hasShadow == o.realBelow { o.window.hasShadow = !o.realBelow }
         if o.shadowStale || !o.inWindow {
             // Worked out once this commit is out (from an empty window it would stay missing).
             o.shadowStale = false
@@ -733,16 +762,17 @@ final class OverlayManager {
             }
             o.orderedBelow = below
             if o.board != nil {
-                // The window takes a frame or so to show: the board's copy stays until then.
+                // The window takes a frame or so to show: the board's copy stays until then,
+                // but not its shadow, which would darken the window's own one (twice over).
+                o.boardShadow.isHidden = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak o] in
                     guard let o, o.inWindow else { return }
                     let b = o.board
                     CATransaction.begin()
                     CATransaction.setDisableActions(true)
-                    o.boardClip.removeFromSuperlayer()
+                    o.boardItem.removeFromSuperlayer()
                     CATransaction.commit()
                     o.board = nil
-                    b?.shadowChanged()
                     if let b, b.isEmpty { b.cover(false) }
                 }
             }
@@ -753,13 +783,54 @@ final class OverlayManager {
         }
     }
 
-    /// End of a frame: the boards' pictures are where they go, so send them to the screen now
-    /// and have their shadows worked out from that, in the same frame as the pictures (asked
-    /// later, the shadow was worked out from a half-drawn board and flickered).
-    func flushShadows() {
-        guard boards.values.contains(where: { $0.shadowStale }) else { return }
-        CATransaction.flush()
-        for b in boards.values { b.flushShadow() }
+    private let shadows = ShadowMaker()
+    /// Whether a window is the key window, which macOS gives a bigger, darker shadow.
+    var isKey: ((CGWindowID) -> Bool)?
+
+    /// The picture's shadow on the board: macOS's own, made for its shape (once per shape and
+    /// size), stretched around the visible part.
+    private func placeShadow(_ o: Overlay) {
+        guard let image = o.image, o.expectedSize.width > 0 else { return }
+        let size = CGSize(width: image.width, height: image.height)
+        let key: ShadowMaker.Key
+        if let k = o.shapeKey, k.size == size {
+            key = k.key
+        } else {
+            key = ShadowMaker.Key(image: image, scale: CGFloat(image.width) / o.expectedSize.width)
+            o.shapeKey = (size, key)
+        }
+        if o.shadow?.key != key && o.shadowWanted != key {
+            o.shadowWanted = key
+            shadows.make(key, from: image) { [weak self, weak o] shadow in
+                guard let o, o.shadowWanted == key else { return }
+                o.shadowWanted = nil
+                o.shadow = shadow
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                self?.placeShadow(o)
+                CATransaction.commit()
+            }
+        }
+        var active: ShadowMaker.Shadow?
+        if isKey?(o.id) == true {
+            active = shadows.active(key)
+            if active == nil {
+                shadows.takeActive(key, window: o.id, size: o.expectedSize, image: image) { [weak self, weak o] _ in
+                    guard let o, o.boardItem.superlayer != nil else { return }
+                    CATransaction.begin()
+                    CATransaction.setDisableActions(true)
+                    self?.placeShadow(o)
+                    CATransaction.commit()
+                }
+            }
+        }
+        guard let shadow = active ?? o.shadow else { return }
+        let b = o.boardItem.bounds
+        o.boardShadow.contents = shadow.image
+        o.boardShadow.contentsScale = shadow.scale
+        o.boardShadow.contentsCenter = shadow.center
+        o.boardShadow.frame = CGRect(x: -shadow.left, y: -shadow.bottom, width: b.width + shadow.left + shadow.right,
+                                     height: b.height + shadow.top + shadow.bottom)
     }
 
     /// Stops every live stream but keeps the stand-ins (with their last frame) in place, e.g.
@@ -814,6 +885,20 @@ final class OverlayManager {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
+    /// Whether the real window is right under the stand-in (see `Overlay.realBelow`).
+    func setRealBelow(_ id: CGWindowID, _ on: Bool) {
+        guard let o = overlays[id], o.realBelow != on else { return }
+        o.realBelow = on
+        guard !o.inWindow else {
+            o.window.hasShadow = !on && !o.fading
+            return
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        o.boardShadow.isHidden = on || o.fading
+        CATransaction.commit()
+    }
+
     /// Hands over to the real window with a short cross-fade: macOS tints window
     /// backgrounds with the wallpaper colour, which a capture can't fully reproduce, so a
     /// hard cut would show a small colour jump.
@@ -822,6 +907,10 @@ final class OverlayManager {
         guard let o = overlays[id], o.shown else { return }
         stopLive(o, keepImage: true)
         o.fading = true
+        // The real window is up underneath with its own shadow; the stand-in's on top of it
+        // would darken it while fading.
+        o.window.hasShadow = false
+        o.boardShadow.isHidden = true
         let done = { [weak self] in
             guard o.fading else { return }  // shown again meanwhile
             o.fading = false
@@ -840,8 +929,8 @@ final class OverlayManager {
             fade.fromValue = 1
             fade.toValue = 0
             fade.duration = duration
-            o.boardClip.add(fade, forKey: "fade")
-            o.boardClip.opacity = 0
+            o.boardItem.add(fade, forKey: "fade")
+            o.boardItem.opacity = 0
             CATransaction.commit()
         }
     }
@@ -874,14 +963,14 @@ final class OverlayManager {
     private func release(_ o: Overlay) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        o.boardClip.removeAllAnimations()
-        o.boardClip.removeFromSuperlayer()
-        o.boardClip.opacity = 1
+        o.boardItem.removeAllAnimations()
+        o.boardItem.removeFromSuperlayer()
+        o.boardItem.opacity = 1
         o.setImage(nil)
         CATransaction.commit()
-        o.board?.shadowChanged()
         if let b = o.board, b.isEmpty { b.cover(false) }
         o.board = nil
+        o.realBelow = false
         if o.inWindow {
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0
@@ -902,8 +991,7 @@ final class OverlayManager {
         guard let o = overlays.removeValue(forKey: id) else { return }
         pendingHide.removeValue(forKey: id)?.cancel()
         stopLive(o)
-        o.boardClip.removeFromSuperlayer()
-        o.board?.shadowChanged()
+        o.boardItem.removeFromSuperlayer()
         if let b = o.board, b.isEmpty { b.cover(false) }
         o.window.orderOut(nil)
     }
