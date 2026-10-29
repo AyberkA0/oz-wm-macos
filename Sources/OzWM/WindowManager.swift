@@ -166,6 +166,9 @@ final class WindowManager {
     /// The window that is key by now (`trackedFocus` runs ahead of it while a scroll to a
     /// window ends before it is focused): it wears macOS's key-window shadow.
     private var keyWindow: CGWindowID?
+    /// The lock screen is up: focus changes then are its own, not the user's.
+    private var screenLocked = false
+    private var unlockedAt: CFTimeInterval = 0
     private var liveReadAgain = false
 
     private struct Animation {
@@ -356,7 +359,13 @@ final class WindowManager {
         // the lock screen) finds nothing, so look again once it is unlocked.
         DistributedNotificationCenter.default().addObserver(forName: .init("com.apple.screenIsUnlocked"),
                                                             object: nil, queue: .main) { [weak self] _ in
+            self?.screenLocked = false
+            self?.unlockedAt = CACurrentMediaTime()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self?.scanAll(initial: false) }
+        }
+        DistributedNotificationCenter.default().addObserver(forName: .init("com.apple.screenIsLocked"),
+                                                            object: nil, queue: .main) { [weak self] _ in
+            self?.screenLocked = true
         }
         driver.onFrame = { [weak self] in self?.frame() }
         // Clicks in other apps (global) and on Oz's own windows (local: peeks, editors).
@@ -1348,12 +1357,18 @@ final class WindowManager {
     private func focusChanged(_ el: AXUIElement) {
         // No round trip to the app here (a busy app stalled this for 200 ms): a window we
         // don't recognise by element is one we don't manage yet anyway.
-        guard enabled, let pid = AX.pid(el), pid != getpid() else { return }
+        guard enabled, let pid = AX.pid(el), pid != getpid(), !screenLocked else { return }
+        // The lock screen or screen saver coming up (closing the lid) is not you leaving the
+        // window that fills the screen: it stays so.
+        let bundle = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+        guard bundle != "com.apple.loginwindow", bundle != "com.apple.ScreenSaver.Engine" else { return }
+        // Nor is macOS giving focus back to a window once it is unlocked.
+        let refocus = CACurrentMediaTime() - unlockedAt < 2
         guard let w = find(el, pid: pid, askApp: false) else {
-            restoreMaximized(focusing: el, pid: pid)
+            if !refocus { restoreMaximized(focusing: el, pid: pid) }
             return
         }
-        restoreMaximized(focusing: w)
+        if !refocus { restoreMaximized(focusing: w) }
         trackedFocus = w.id
         keyWindow = w.id
         guard gesture == nil, windows[w.id] != nil, let (key, strip) = locate(w.id) else { return }
