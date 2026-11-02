@@ -1180,7 +1180,8 @@ final class WindowManager {
     }
 
     private func reassignSpaceIfNeeded(_ id: CGWindowID) {
-        guard let (key, strip) = locate(id), let space = Spaces.space(of: id), space != key.space else { return }
+        guard let (key, strip) = locate(id), let space = Spaces.space(of: id), space != key.space,
+              let screen = Geometry.screen(displayID: key.display) ?? NSScreen.main else { return }
         if untiledIDs.contains(space) {
             // Moved to a desktop that isn't tiled: let it go.
             unmanage(id, focusNeighbor: false)
@@ -1190,7 +1191,7 @@ final class WindowManager {
         if strip.isEmpty { strips.removeValue(forKey: key) }
         let target = self.strip(StripKey(space: space, display: key.display))
         let h = Strip.height(forRatio: settings.defaultHeight,
-                             viewportHeight: viewport(Geometry.screen(displayID: key.display) ?? NSScreen.main!).height,
+                             viewportHeight: viewport(screen).height,
                              gap: settings.gap)
         target.insert(id, height: h, anchor: target.focused, position: .end)
         windows[id]?.lastFrame = nil
@@ -3593,8 +3594,25 @@ final class WindowManager {
               let i = screens.firstIndex(of: c.screen) else { return }
         let height = c.strip.rows[r].height
         let target = screens[(i + 1) % screens.count]
-        c.strip.remove(id)
         let tkey = visibleKey(for: target)
+        if untiledIDs.contains(tkey.space) || Spaces.isFullscreen(tkey.space) {
+            // That screen's desktop isn't tiled: the window goes there, in its middle, and
+            // Oz lets it go (as when it is moved to such a desktop).
+            guard let w = windows[id] else { return }
+            let vf = Geometry.ax(target.usableFrame)
+            let size = CGSize(width: min(w.lastFrame?.width ?? 800, vf.width), height: min(w.lastFrame?.height ?? 600, vf.height))
+            let frame = CGRect(x: vf.midX - size.width / 2, y: vf.midY - size.height / 2, width: size.width, height: size.height)
+            writer.move(id, pid: w.pid, element: w.element, to: frame.integral, setSize: true)
+            unmanage(id, focusNeighbor: false)
+            activate(w)
+            return
+        }
+        c.strip.remove(id)
+        if c.strip.isEmpty {
+            strips.removeValue(forKey: c.key)
+        } else {
+            c.strip.scrollY = c.strip.clampScroll(c.strip.scrollY, viewportHeight: c.vh, gap: settings.gap)
+        }
         let ts = strip(tkey)
         ts.insert(id, height: min(height, viewport(target).height), anchor: ts.focused, position: .below)
         ts.focused = id

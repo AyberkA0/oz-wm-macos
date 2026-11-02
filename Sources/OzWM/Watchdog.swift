@@ -49,9 +49,12 @@ enum Watchdog {
     }
 
     /// Our own frames (plus the system call they are waiting in) from the main thread.
+    /// Nothing is allocated while it is suspended: it may hold the allocator's lock.
     private static func mainStack() -> [String] {
+        let pcs = UnsafeMutablePointer<UInt>.allocate(capacity: 66)
+        defer { pcs.deallocate() }
+        var n = 0
         guard thread_suspend(mainThread) == KERN_SUCCESS else { return [] }
-        var pcs: [UInt] = []
         var state = arm_thread_state64_t()
         var count = mach_msg_type_number_t(MemoryLayout<arm_thread_state64_t>.size / MemoryLayout<UInt32>.size)
         let kr = withUnsafeMutablePointer(to: &state) {
@@ -60,8 +63,9 @@ enum Watchdog {
             }
         }
         if kr == KERN_SUCCESS {
-            pcs.append(UInt(state.__pc))
-            pcs.append(UInt(state.__lr))
+            pcs[0] = UInt(state.__pc)
+            pcs[1] = UInt(state.__lr)
+            n = 2
             var fp = UInt(state.__fp)
             for _ in 0..<64 where fp != 0 {
                 var frame: (UInt, UInt) = (0, 0)  // (previous fp, return address)
@@ -71,14 +75,15 @@ enum Watchdog {
                                       vm_address_t(UInt(bitPattern: $0)), &size)
                 }
                 guard ok == KERN_SUCCESS, frame.1 != 0, frame.0 > fp else { break }
-                pcs.append(frame.1)
+                pcs[n] = frame.1
+                n += 1
                 fp = frame.0
             }
         }
         thread_resume(mainThread)
 
         var out: [String] = []
-        for pc in pcs {
+        for pc in UnsafeBufferPointer(start: pcs, count: n) {
             var info = Dl_info()
             // Strip pointer authentication bits before looking the address up.
             let addr = UnsafeRawPointer(bitPattern: pc & 0x0000_000F_FFFF_FFFF)
