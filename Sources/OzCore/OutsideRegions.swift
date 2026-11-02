@@ -58,23 +58,56 @@ public enum OutsideRegions {
         return best.sorted { $0.minY != $1.minY ? $0.minY < $1.minY : $0.minX < $1.minX }
     }
 
-    /// Frames for `count` windows sharing `region`, side by side along its long side
-    /// (stacked when it's taller than wide), with `gap` between them and around them.
+    /// Frames for `count` windows sharing `region` equally (see `frames(in:shares:gap:)`).
     public static func frames(in region: CGRect, count: Int, gap: CGFloat) -> [CGRect] {
-        guard count > 0 else { return [] }
+        frames(in: region, shares: Array(repeating: 1, count: max(count, 0)), gap: gap)
+    }
+
+    /// Frames for windows sharing `region`, side by side along its long side (stacked when
+    /// it's taller than wide), each as long as its share of the whole, with `gap` between
+    /// them and around them.
+    public static func frames(in region: CGRect, shares: [CGFloat], gap: CGFloat) -> [CGRect] {
+        guard !shares.isEmpty else { return [] }
         let r = region.insetBy(dx: gap, dy: gap)
         let vertical = r.height >= r.width
-        let total = (vertical ? r.height : r.width) - gap * CGFloat(count - 1)
+        let total = (vertical ? r.height : r.width) - gap * CGFloat(shares.count - 1)
+        let sum = shares.reduce(0, +)
         var out: [CGRect] = []
         var pos = vertical ? r.minY : r.minX
-        for i in 0..<count {
+        for (i, share) in shares.enumerated() {
             // The last one takes what's left so rounding never leaves a gap.
             let end = vertical ? r.maxY : r.maxX
-            let len = i == count - 1 ? end - pos : (total / CGFloat(count)).rounded()
+            let len = i == shares.count - 1 ? end - pos : (total * share / sum).rounded()
             out.append(vertical ? CGRect(x: r.minX, y: pos, width: r.width, height: len)
                                 : CGRect(x: pos, y: r.minY, width: len, height: r.height))
             pos += len + gap
         }
         return out
+    }
+
+    /// The shares after the user dragged an edge of window `i` in `region` until it was
+    /// `frame`: the edge it shares with a neighbour moved, and that neighbour gives or takes
+    /// the difference, each keeping at least `minLength`. Only those edges are the user's:
+    /// nil when neither moved (an outer edge, or its size across the region).
+    public static func shares(resizing i: Int, to frame: CGRect, in region: CGRect, shares: [CGFloat],
+                              gap: CGFloat, minLength: CGFloat = 100) -> [CGFloat]? {
+        let current = frames(in: region, shares: shares, gap: gap)
+        guard current.count > 1, current.indices.contains(i) else { return nil }
+        let vertical = region.height >= region.width
+        func start(_ f: CGRect) -> CGFloat { vertical ? f.minY : f.minX }
+        func end(_ f: CGRect) -> CGFloat { vertical ? f.maxY : f.maxX }
+        // The edge between `a` and the one after it goes to `edge` (where `a` now ends).
+        func move(_ a: Int, to edge: CGFloat) -> [CGFloat]? {
+            let lo = start(current[a]) + minLength, hi = end(current[a + 1]) - minLength - gap
+            guard lo <= hi else { return nil }
+            let e = min(max(edge, lo), hi)
+            var lengths = current.map { end($0) - start($0) }
+            lengths[a] = e - start(current[a])
+            lengths[a + 1] = end(current[a + 1]) - (e + gap)
+            return lengths
+        }
+        if i > 0, abs(start(frame) - start(current[i])) > 1 { return move(i - 1, to: start(frame) - gap) }
+        if i < current.count - 1, abs(end(frame) - end(current[i])) > 1 { return move(i, to: end(frame)) }
+        return nil
     }
 }

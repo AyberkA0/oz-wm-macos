@@ -259,6 +259,11 @@ final class WindowManager {
     private var lastPreviewUpdate: CFTimeInterval = 0
     /// The tiled window whose edge is being dragged (until the mouse is let go).
     private var resizeDrag: CGWindowID?
+    /// The docked window whose edge is being dragged (until the mouse is let go), and its
+    /// frame being read (one read at a time; another wanted once it's in).
+    private var dockResize: (id: CGWindowID, key: StripKey)?
+    private var dockReadInFlight = false
+    private var dockReadAgain = false
     /// The strip scrolling under a drag: its current speed (points/s, positive = down),
     /// easing towards what the cursor's place in the edge bands asks for. Once started it
     /// lasts until the mouse is let go or leaves the zone (back in the middle the speed just
@@ -511,11 +516,7 @@ final class WindowManager {
     func capturePreset(named name: String?, screen: NSScreen) -> Preset? {
         let key = visibleKey(for: screen)
         var state = strips[key]?.state(describe: describe) ?? StripState()
-        for (region, ids) in docks[key] ?? [:] {
-            state.docks[String(region)] = ids.compactMap(describe).map {
-                StripState.Window(id: $0.id, app: $0.app, bundleID: $0.bundleID, title: $0.title)
-            }
-        }
+        state.docks = dockedState(key)
         var apps: [Preset.App] = []
         var seen = Set<String>()
         for id in state.windowIDs {
@@ -605,6 +606,7 @@ final class WindowManager {
                 if let id = WindowMatcher.matchLoosely(w, in: candidates, excluding: used) {
                     used.insert(id)
                     docked[i, default: []].append(id)
+                    state[id].dockShare = w.weight.map { CGFloat($0) }
                 }
             }
         }
@@ -633,6 +635,18 @@ final class WindowManager {
     }
 
     // MARK: Saved layout
+
+    /// A desktop's docked windows as saved: by region, in order, with their shares.
+    private func dockedState(_ key: StripKey) -> [String: [StripState.Window]] {
+        var out: [String: [StripState.Window]] = [:]
+        for (region, ids) in docks[key] ?? [:] {
+            out[String(region)] = ids.compactMap(describe).map {
+                StripState.Window(id: $0.id, app: $0.app, bundleID: $0.bundleID, title: $0.title,
+                                  weight: state[$0.id].dockShare.map(Double.init))
+            }
+        }
+        return out
+    }
 
     private func describe(_ id: CGWindowID) -> WindowDescription? {
         (windows[id] ?? floating[id]).map { WindowDescription(id: $0.id, app: $0.appName, bundleID: $0.bundleID, title: $0.title) }
@@ -664,6 +678,7 @@ final class WindowManager {
                     if let id = WindowMatcher.match(w, in: candidates, excluding: used) {
                         used.insert(id)
                         docked[i, default: []].append(id)
+                        state[id].dockShare = w.weight.map { CGFloat($0) }
                     }
                 }
             }
@@ -698,22 +713,12 @@ final class WindowManager {
         for (key, strip) in strips {
             guard let name = Spaces.persistentKey(key.space, displays: displays) else { continue }
             var state = strip.state(describe: describe)
-            for (region, ids) in docks[key] ?? [:] {
-                state.docks[String(region)] = ids.compactMap(describe).map {
-                    StripState.Window(id: $0.id, app: $0.app, bundleID: $0.bundleID, title: $0.title)
-                }
-            }
+            state.docks = dockedState(key)
             desktops[name] = state
         }
-        for (key, regions) in docks where strips[key] == nil {
+        for key in docks.keys where strips[key] == nil {
             guard let name = Spaces.persistentKey(key.space, displays: displays) else { continue }
-            var state = StripState()
-            for (region, ids) in regions {
-                state.docks[String(region)] = ids.compactMap(describe).map {
-                    StripState.Window(id: $0.id, app: $0.app, bundleID: $0.bundleID, title: $0.title)
-                }
-            }
-            desktops[name] = state
+            desktops[name] = StripState(docks: dockedState(key))
         }
         guard let data = LayoutStore.encode(desktops), data != lastSavedLayout else { return }
         lastSavedLayout = data
@@ -1062,9 +1067,7 @@ final class WindowManager {
             floating[wid] = w
             if m.manual { state[wid].manualFloat = true }
             if let d = m.dock {
-                var list = (docks[d.key]?[d.region] ?? []).filter { floating[$0] != nil }
-                list.insert(wid, at: min(d.index, list.count))
-                docks[d.key, default: [:]][d.region] = list
+                insertDocked(wid, key: d.key, region: d.region, at: d.index)
                 layoutDocks(d.key)
                 checkDocked(w, key: d.key)
             }
@@ -1226,6 +1229,15 @@ final class WindowManager {
             if floating[w.id] != nil {
                 // Dragging a window taken out of the strip: it may be dropped back in.
                 let ours = CACurrentMediaTime() - (state[w.id].dockPlacedAt ?? 0) < Timing.ozMoveEcho
+                // A docked window's edge dragged: its neighbour there gives or takes the room
+                // (resizing from the top or left edge moves it too: that's no drag to drop).
+                if notification == kAXWindowResizedNotification && mouseDown && !ours, let place = dockPlace(w.id) {
+                    if dockResize == nil { dockResize = (w.id, place.key) }
+                    if state[w.id].clear(\.pendingDrop), dragging == w.id { dragging = nil; dropPreview.hide() }
+                    trackDockResize(w)
+                    return
+                }
+                if dockResize?.id == w.id { return }
                 if dragged && state[w.id].manualFloat && !ours {
                     state[w.id].pendingDrop = true
                     dragging = w.id
@@ -1375,6 +1387,7 @@ final class WindowManager {
         dropPreview.hide()
         insertionLine.hide()
         endLiveResize()
+        endDockResize()
         resolveDrops()
     }
 
@@ -1630,13 +1643,7 @@ final class WindowManager {
     // MARK: Dragging in and out of the scroll area
 
     private func rememberMinimized(_ id: CGWindowID) {
-        var dock: WindowState.DockPlace?
-        for (key, regions) in docks {
-            for (i, ids) in regions {
-                if let j = ids.firstIndex(of: id) { dock = .init(key: key, region: i, index: j) }
-            }
-        }
-        state[id].minimized = .init(manual: state[id].manualFloat, dock: dock)
+        state[id].minimized = .init(manual: state[id].manualFloat, dock: dockPlace(id))
     }
 
     /// A tiled window leaves `strip` and floats, taken out by the user (they may drop it
@@ -1811,13 +1818,11 @@ final class WindowManager {
     private func dock(_ w: ManagedWindow, at point: CGPoint) -> Bool {
         guard let plan = dockPlan(at: point, excluding: w.id) else { return false }
         undock(w.id, layout: false)
-        var list = plan.others
-        list.insert(w.id, at: plan.index)
         let key = plan.key, i = plan.region
-        docks[key, default: [:]][i] = list
+        insertDocked(w.id, key: key, region: i, at: plan.index)
         floating[w.id] = w
         state[w.id].manualFloat = true
-        Log.debug("docked \(w.id) \(w.appName) in region \(i) (\(list.count) there)")
+        Log.debug("docked \(w.id) \(w.appName) in region \(i) (\(plan.others.count + 1) there)")
         layoutDocks(key)
         checkDocked(w, key: key)
         return true
@@ -1853,13 +1858,15 @@ final class WindowManager {
         let others = (docks[key]?[i] ?? []).filter { $0 != id && floating[$0] != nil }
         let r = regions[i]
         let vertical = r.height >= r.width
+        var shares = dockShares(others)
         var index = others.count
-        for (j, f) in OutsideRegions.frames(in: r, count: others.count, gap: settings.outerGap).enumerated()
+        for (j, f) in OutsideRegions.frames(in: r, shares: shares, gap: settings.outerGap).enumerated()
         where vertical ? point.y < f.midY : point.x < f.midX {
             index = j
             break
         }
-        let frame = OutsideRegions.frames(in: r, count: others.count + 1, gap: settings.outerGap)[index]
+        shares.insert(Self.joiningShare(shares) ?? 1, at: index)
+        let frame = OutsideRegions.frames(in: r, shares: shares, gap: settings.outerGap)[index]
         return (key, i, others, index, frame)
     }
 
@@ -1999,6 +2006,7 @@ final class WindowManager {
 
     /// Takes a window out of its region; the rest of that region closes the gap.
     private func undock(_ id: CGWindowID, layout: Bool = true) {
+        state[id].dockShare = nil
         for (key, regions) in docks {
             for (i, ids) in regions where ids.contains(id) {
                 let rest = ids.filter { $0 != id }
@@ -2010,15 +2018,34 @@ final class WindowManager {
         }
     }
 
+    /// Puts a window in a region at `index` (or last). It joins with the others' average
+    /// share, so their sizes against each other stay as they were made.
+    private func insertDocked(_ id: CGWindowID, key: StripKey, region: Int, at index: Int) {
+        var list = (docks[key]?[region] ?? []).filter { floating[$0] != nil && $0 != id }
+        state[id].dockShare = Self.joiningShare(dockShares(list))
+        list.insert(id, at: min(index, list.count))
+        docks[key, default: [:]][region] = list
+    }
+
+    private func dockShares(_ ids: [CGWindowID]) -> [CGFloat] { ids.map { state[$0].dockShare ?? 1 } }
+
+    /// The share a window joining others in a region gets (as long as the rest on average;
+    /// nil, an even share, when none was set).
+    private static func joiningShare(_ others: [CGFloat]) -> CGFloat? {
+        guard !others.isEmpty else { return nil }
+        let mean = others.reduce(0, +) / CGFloat(others.count)
+        return abs(mean - 1) < 0.0001 ? nil : mean
+    }
+
     /// Moves the docked windows of a desktop to their region frames.
-    private func layoutDocks(_ key: StripKey) {
+    private func layoutDocks(_ key: StripKey, except held: CGWindowID? = nil) {
         guard let screen = visibleScreen(key), let byRegion = docks[key] else { return }
         let regions = outsideRegions(screen)
         let now = CACurrentMediaTime()
         for (i, ids) in byRegion where regions.indices.contains(i) {
             let live = ids.filter { floating[$0] != nil }
-            for (id, f) in zip(live, OutsideRegions.frames(in: regions[i], count: live.count, gap: settings.outerGap)) {
-                guard let w = floating[id] else { continue }
+            for (id, f) in zip(live, OutsideRegions.frames(in: regions[i], shares: dockShares(live), gap: settings.outerGap)) {
+                guard id != held, let w = floating[id] else { continue }
                 if let lf = w.lastFrame, lf.approxEqual(f) { continue }
                 state[id].dockPlacedAt = now
                 writer.move(id, pid: w.pid, element: w.element, to: f, setSize: true)
@@ -2128,6 +2155,69 @@ final class WindowManager {
             strip.scrollY = strip.clampScroll(strip.scrollY, viewportHeight: viewport(screen).height, gap: settings.gap)
         }
         relayout(lr.key, animated: true)
+    }
+
+    /// The user is dragging an edge of a docked window: read its frame (on the app's queue)
+    /// and give its neighbour the room it took or left.
+    private func trackDockResize(_ w: ManagedWindow) {
+        if dockReadInFlight {
+            dockReadAgain = true
+            return
+        }
+        dockReadInFlight = true
+        let id = w.id, element = w.element
+        writer.perform(pid: w.pid) { [weak self] in
+            let frame = AX.frame(element)
+            DispatchQueue.main.async { self?.dockResizeRead(id, frame) }
+        }
+    }
+
+    private func dockResizeRead(_ id: CGWindowID, _ frame: CGRect?) {
+        dockReadInFlight = false
+        defer {
+            if dockReadAgain, dockResize?.id == id, let w = floating[id] {
+                dockReadAgain = false
+                trackDockResize(w)
+            }
+        }
+        guard dockResize?.id == id else { return }
+        applyDockResize(id, frame)
+    }
+
+    /// The docked window `id` was resized by the user to `frame`: the shares in its region
+    /// follow, and the others there move (not it: the user has it).
+    private func applyDockResize(_ id: CGWindowID, _ frame: CGRect?) {
+        guard let frame, let w = floating[id], let place = dockPlace(id), let screen = visibleScreen(place.key) else { return }
+        let regions = outsideRegions(screen)
+        guard regions.indices.contains(place.region) else { return }
+        let ids = (docks[place.key]?[place.region] ?? []).filter { floating[$0] != nil }
+        guard let i = ids.firstIndex(of: id),
+              let shares = OutsideRegions.shares(resizing: i, to: frame, in: regions[place.region],
+                                                 shares: dockShares(ids), gap: settings.outerGap) else { return }
+        for (other, share) in zip(ids, shares) { state[other].dockShare = share }
+        w.lastFrame = frame
+        layoutDocks(place.key, except: id)
+    }
+
+    /// Mouse released: the dragged window takes its exact place too (its outer edges and its
+    /// size across the region go back to the region's).
+    private func endDockResize() {
+        guard let r = dockResize else { return }
+        dockResize = nil
+        dockReadAgain = false
+        guard let w = floating[r.id] else { return }
+        // Where it was let go: a read still on its way when the button came up is dropped.
+        let element = w.element
+        writer.perform(pid: w.pid) { [weak self] in
+            let frame = AX.frame(element)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.applyDockResize(r.id, frame)
+                self.floating[r.id]?.lastFrame = nil
+                Log.debug("docked \(r.id) resized: shares \(self.dockShares(self.docks[r.key]?[self.dockPlace(r.id)?.region ?? -1] ?? []))")
+                self.layoutDocks(r.key)
+            }
+        }
     }
 
     // MARK: Gestures
@@ -3386,8 +3476,16 @@ final class WindowManager {
         return ScreenFill.covers(r, visible: v)
     }
 
-    private func isDocked(_ id: CGWindowID) -> Bool {
-        docks.values.contains { $0.values.contains { $0.contains(id) } }
+    private func isDocked(_ id: CGWindowID) -> Bool { dockPlace(id) != nil }
+
+    /// Where a docked window is: its desktop, region and place there.
+    private func dockPlace(_ id: CGWindowID) -> WindowState.DockPlace? {
+        for (key, regions) in docks {
+            for (i, ids) in regions {
+                if let j = ids.firstIndex(of: id) { return .init(key: key, region: i, index: j) }
+            }
+        }
+        return nil
     }
 
     /// A floating or docked window its app moved or resized (not the user, not Oz, not macOS

@@ -44,6 +44,9 @@ struct WindowState: Equatable {
     var pendingDrop = false
     /// Made to fill the screen (see `Zoom`).
     var zoom: Zoom?
+    /// Docked: its share of its region against the others there (nil: 1), set by dragging
+    /// the edge between two of them.
+    var dockShare: CGFloat?
     /// When Oz last moved it (a docked window's move notifications aren't a user drag).
     var dockPlacedAt: CFTimeInterval?
     /// Sent to the Dock: brought back, it goes back where it was (its region and place)

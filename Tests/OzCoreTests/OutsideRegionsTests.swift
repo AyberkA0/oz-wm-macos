@@ -65,4 +65,60 @@ final class OutsideRegionsTests: XCTestCase {
             CGRect(x: 505, y: 10, width: 485, height: 380),
         ])
     }
+
+    func testSharesSetEachWindowsLength() {
+        // 1000 high, 10 pt gaps: 970 for two windows, a third and two thirds.
+        let tall = CGRect(x: 0, y: 0, width: 600, height: 1000)
+        XCTAssertEqual(OutsideRegions.frames(in: tall, shares: [1, 2], gap: 10), [
+            CGRect(x: 10, y: 10, width: 580, height: 323),
+            CGRect(x: 10, y: 343, width: 580, height: 647),
+        ])
+        XCTAssertEqual(OutsideRegions.frames(in: tall, shares: [1, 1], gap: 10), OutsideRegions.frames(in: tall, count: 2, gap: 10))
+    }
+
+    func testDraggingASharedEdgeMovesItsNeighbour() {
+        let tall = CGRect(x: 0, y: 0, width: 600, height: 1000)
+        let even: [CGFloat] = [1, 1, 1]
+        let before = OutsideRegions.frames(in: tall, shares: even, gap: 10)
+        // The middle window's top edge dragged 100 pt up: the one above gets shorter by that.
+        var f = before[1]
+        f.origin.y -= 100
+        f.size.height += 100
+        let shares = OutsideRegions.shares(resizing: 1, to: f, in: tall, shares: even, gap: 10)!
+        let after = OutsideRegions.frames(in: tall, shares: shares, gap: 10)
+        XCTAssertEqual(after[0].height, before[0].height - 100)
+        XCTAssertEqual(after[1], f)
+        XCTAssertEqual(after[2], before[2])
+        // Its bottom edge dragged down: the one below gives the room.
+        var g = before[1]
+        g.size.height += 50
+        let below = OutsideRegions.frames(in: tall, shares: OutsideRegions.shares(resizing: 1, to: g, in: tall, shares: even, gap: 10)!, gap: 10)
+        XCTAssertEqual(below[0], before[0])
+        XCTAssertEqual(below[1], g)
+        XCTAssertEqual(below[2].minY, before[2].minY + 50)
+        XCTAssertEqual(below[2].maxY, before[2].maxY)
+    }
+
+    func testANeighbourKeepsItsMinimumLength() {
+        let wide = CGRect(x: 0, y: 0, width: 1000, height: 400)
+        let before = OutsideRegions.frames(in: wide, count: 2, gap: 10)
+        var f = before[0]
+        f.size.width += 800
+        let after = OutsideRegions.frames(in: wide, shares: OutsideRegions.shares(resizing: 0, to: f, in: wide, shares: [1, 1], gap: 10)!, gap: 10)
+        XCTAssertEqual(after[1].width, 100)
+        XCTAssertEqual(after[1].maxX, 990)
+    }
+
+    func testOuterEdgesAndTheCrossSizeAreNotShared() {
+        let tall = CGRect(x: 0, y: 0, width: 600, height: 1000)
+        let before = OutsideRegions.frames(in: tall, count: 2, gap: 10)
+        var top = before[0]
+        top.origin.y += 40
+        top.size.height -= 40
+        XCTAssertNil(OutsideRegions.shares(resizing: 0, to: top, in: tall, shares: [1, 1], gap: 10))
+        var narrow = before[1]
+        narrow.size.width -= 200
+        XCTAssertNil(OutsideRegions.shares(resizing: 1, to: narrow, in: tall, shares: [1, 1], gap: 10))
+        XCTAssertNil(OutsideRegions.shares(resizing: 0, to: before[0], in: tall, shares: [1], gap: 10))
+    }
 }
