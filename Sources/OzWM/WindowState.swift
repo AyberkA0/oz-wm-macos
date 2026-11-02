@@ -40,6 +40,9 @@ struct WindowState: Equatable {
     /// outside it, toggleFloat): dropped into a scroll area, it is tiled again. Not a window
     /// floating because of a rule or a fixed size.
     var manualFloat = false
+    /// Floated on purpose (toggleFloat, the menu): wherever it is dragged it stays floating,
+    /// joining neither the strip nor a region. toggleFloat or undo tiles it again.
+    var keptFloating = false
     /// Being dragged (or a tab being torn off): placed when the mouse is let go.
     var pendingDrop = false
     /// Made to fill the screen (see `Zoom`).
@@ -63,6 +66,7 @@ struct WindowState: Equatable {
 
     struct Minimized: Equatable {
         let manual: Bool
+        let kept: Bool
         let dock: DockPlace?
     }
 
@@ -73,6 +77,10 @@ struct WindowState: Equatable {
     }
 
     var isEmpty: Bool { self == WindowState() }
+
+    /// Taken out of the strip by a drag (or torn off): let go in a scroll area or a region,
+    /// it is placed there.
+    var droppable: Bool { manualFloat && !keptFloating }
 
     /// The value, cleared.
     mutating func take<T>(_ field: WritableKeyPath<WindowState, T?>) -> T? {

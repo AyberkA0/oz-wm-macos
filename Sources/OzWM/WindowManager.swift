@@ -890,6 +890,7 @@ final class WindowManager {
             state.updateAll { _, s in
                 s.minHeight = nil
                 s.manualFloat = false
+                s.keptFloating = false
                 s.userDraggedAt = nil
                 s.pendingDrop = false
             }
@@ -1066,6 +1067,7 @@ final class WindowManager {
         if let m = state[wid].take(\.minimized) {
             floating[wid] = w
             if m.manual { state[wid].manualFloat = true }
+            state[wid].keptFloating = m.kept
             if let d = m.dock {
                 insertDocked(wid, key: d.key, region: d.region, at: d.index)
                 layoutDocks(d.key)
@@ -1238,7 +1240,7 @@ final class WindowManager {
                     return
                 }
                 if dockResize?.id == w.id { return }
-                if dragged && state[w.id].manualFloat && !ours {
+                if dragged && state[w.id].droppable && !ours {
                     state[w.id].pendingDrop = true
                     dragging = w.id
                     updateDropPreview()
@@ -1643,7 +1645,7 @@ final class WindowManager {
     // MARK: Dragging in and out of the scroll area
 
     private func rememberMinimized(_ id: CGWindowID) {
-        state[id].minimized = .init(manual: state[id].manualFloat, dock: dockPlace(id))
+        state[id].minimized = .init(manual: state[id].manualFloat, kept: state[id].keptFloating, dock: dockPlace(id))
     }
 
     /// A tiled window leaves `strip` and floats, taken out by the user (they may drop it
@@ -1665,6 +1667,7 @@ final class WindowManager {
         floating.removeValue(forKey: w.id)
         windows[w.id] = w
         state[w.id].manualFloat = false
+        state[w.id].keptFloating = false
         state[w.id].pendingDrop = false
         state[w.id].zoom = nil
     }
@@ -1685,6 +1688,7 @@ final class WindowManager {
         state[id].dockPlacedAt = nil
         floating.removeValue(forKey: id)
         state[id].manualFloat = false
+        state[id].keptFloating = false
         state[id].pendingDrop = false
     }
 
@@ -1748,7 +1752,7 @@ final class WindowManager {
     /// nearest to where it was dropped, sliding in from there; outside, in one of the regions
     /// around the zone, it is tiled in that region; anywhere else it stays put.
     private func drop(_ id: CGWindowID, at frame: CGRect?) {
-        guard enabled, let frame, let w = floating[id], state[id].manualFloat else { return }
+        guard enabled, let frame, let w = floating[id], state[id].droppable else { return }
         // Where the user left it, not where Oz last put it: a window dropped back into its own
         // region still has to be fitted there again.
         w.lastFrame = frame
@@ -1887,7 +1891,7 @@ final class WindowManager {
         let p = CGPoint(x: m.x, y: Geometry.primaryHeight - m.y)
         var target: CGRect?
         var line: CGRect?
-        if windows[id] != nil || (floating[id] != nil && state[id].manualFloat) {
+        if windows[id] != nil || (floating[id] != nil && state[id].droppable) {
             if dropTarget(p) != nil {
                 // In the zone: the split line it would go in (none if it would stay put).
                 line = zoneSlot(at: p, dragging: id)?.line
@@ -3657,9 +3661,11 @@ final class WindowManager {
     private func toggleFloat(_ c: Context) {
         guard let fid = systemFocusedWindowID() else { return }
         if let w = windows[fid] {
-            // Tiled -> floating: take it out and center it.
+            // Tiled -> floating: take it out and center it. It stays floating wherever it's
+            // dragged (as asked), until toggled back or undone.
             beginTransition(c.key)
             makeFloating(w, from: c.strip)
+            state[fid].keptFloating = true
             let vp = viewport(c.screen)
             let size = CGSize(width: min(vp.width * 0.6, 1200), height: min(vp.height * 0.7, 900))
             let origin = CGPoint(x: vp.midX - size.width / 2, y: vp.midY - size.height / 2)
@@ -3729,6 +3735,14 @@ final class WindowManager {
             d["display"] = key.display
         }
         return d
+    }
+
+    /// The focused window, if Oz arranges it: its app and whether it floats (for the menu).
+    func focusedWindowMode() -> (app: String, floating: Bool)? {
+        guard let id = focusedWindowID() else { return nil }
+        if let w = windows[id] { return (w.appName, false) }
+        if let w = floating[id] { return (w.appName, true) }
+        return nil
     }
 
     func allWindowsInfo() -> [[String: Any]] {

@@ -294,6 +294,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     }
                 }
             }
+            // The focused window is still the app's: a status item's menu doesn't take focus.
+            if wm.enabled, let f = wm.focusedWindowMode() {
+                item(f.floating ? "Tile Focused Window (\(f.app))" : "Float Focused Window (\(f.app))", #selector(toggleFloat))
+            }
             item("Keep Windows Alive (Live Capture)", #selector(toggleLivePeek)).state = wm.settings.livePeek ? .on : .off
             item("Smooth Scrolling (Snapshots While Moving)", #selector(toggleSmoothScroll)).state = wm.settings.smoothScroll ? .on : .off
             item("Magnetic Scrolling (Stop at Windows)", #selector(toggleMagneticScroll)).state = wm.settings.swipe.snap == .always ? .on : .off
@@ -510,6 +514,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.button?.appearsDisabled = !tiled
     }
     @objc private func retile() { wm.perform("retile") }
+    @objc private func toggleFloat() { wm.perform("toggleFloat") }
     @objc private func reloadConfig() { config.load() }
 
     @objc private func editConfig() {
