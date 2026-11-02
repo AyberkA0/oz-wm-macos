@@ -147,7 +147,6 @@ final class WindowManager {
     /// redraw in its focused look, and while it does it answers moves 50-70 ms late
     /// (measured), so focusing mid-glide made that window trail behind and then jump.
     private var pendingActivation: [StripKey: CGWindowID] = [:]
-    private static let standInSettle: CFTimeInterval = 0.06
     /// Last focused window as reported by AX notifications (avoids asking the app).
     private var trackedFocus: CGWindowID?
     /// The window that is key by now (`trackedFocus` runs ahead of it while a scroll to a
@@ -283,7 +282,6 @@ final class WindowManager {
     /// when it merely passes through), and the timer that notices while it doesn't move.
     private var bandSince: CFTimeInterval?
     private var dwellTimer: Timer?
-    private static let bandDwell = 0.35
     /// Strips whose layout must be re-applied on the next display frame.
     private var dirty = Set<StripKey>()
     private let driver = FrameDriver()
@@ -310,14 +308,14 @@ final class WindowManager {
         ws.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
             Spaces.invalidate()
             // Give the window server a moment to settle the new Space.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Timing.spaceSettle) {
                 self?.spaceChanged()
             }
         }
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                object: nil, queue: .main) { [weak self] _ in
             Spaces.invalidate()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self?.screensChanged() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + Timing.screensSettle) { self?.screensChanged() }
         }
         // While the screen is locked apps report no windows: a scan then (e.g. Oz started at
         // the lock screen) finds nothing, so look again once it is unlocked.
@@ -325,7 +323,7 @@ final class WindowManager {
                                                             object: nil, queue: .main) { [weak self] _ in
             self?.screenLocked = false
             self?.unlockedAt = CACurrentMediaTime()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self?.scanAll(initial: false) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + Timing.unlockScan) { self?.scanAll(initial: false) }
         }
         DistributedNotificationCenter.default().addObserver(forName: .init("com.apple.screenIsLocked"),
                                                             object: nil, queue: .main) { [weak self] _ in
@@ -365,7 +363,7 @@ final class WindowManager {
         scanAll(initial: true)
         // Written when it changed: a few seconds of rearranging at most are lost to a crash.
         // The same tick tidies up what piles up over a long run.
-        saveTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+        saveTimer = Timer.scheduledTimer(withTimeInterval: Timing.saveEvery, repeats: true) { [weak self] _ in
             self?.saveLayout()
             self?.housekeeping()
         }
@@ -495,7 +493,7 @@ final class WindowManager {
         for key in Array(pendingActivation.keys) where !live.contains(key) { pendingActivation.removeValue(forKey: key) }
         let now = CACurrentMediaTime()
         state.updateAll { id, s in
-            func recent(_ t: CFTimeInterval?) -> CFTimeInterval? { t.flatMap { now - $0 > 10 ? nil : $0 } }
+            func recent(_ t: CFTimeInterval?) -> CFTimeInterval? { t.flatMap { now - $0 > Timing.forgetAfter ? nil : $0 } }
             s.userDraggedAt = recent(s.userDraggedAt)
             s.userResizedAt = recent(s.userResizedAt)
             s.sizeEnforcedAt = recent(s.sizeEnforcedAt)
@@ -545,7 +543,7 @@ final class WindowManager {
             setScrollArea(nil, screen: screen)
         }
         let key = visibleKey(for: screen)
-        openingPreset[key] = (preset, CACurrentMediaTime() + 30)
+        openingPreset[key] = (preset, CACurrentMediaTime() + Timing.presetOpening)
         let here = Set((strips[key]?.windowIDs ?? []) + (docks[key].map { Array($0.values.joined()) } ?? []))
         let appsHere = Set(here.compactMap { (windows[$0] ?? floating[$0]).map { $0.bundleID ?? $0.appName } })
         for app in preset.apps where !appsHere.contains(app.bundleID ?? app.name) {
@@ -571,7 +569,7 @@ final class WindowManager {
     /// after Oz moved it, while Oz took that move for its own and ignored it. Twice, as some
     /// apps take a while.
     private func verifyPlacement(_ id: CGWindowID) {
-        for delay in [0.8, 2.0] {
+        for delay in Timing.placementChecks {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self, let w = self.windows[id] else { return }
                 self.scheduleFrameCheck(w)
@@ -585,7 +583,7 @@ final class WindowManager {
         presetApplyWork[key]?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.applyOpeningPreset(key) }
         presetApplyWork[key] = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Timing.presetSettle, execute: work)
     }
 
     /// Puts the windows on this desktop where the preset has them (matched by app and, where
@@ -1089,7 +1087,7 @@ final class WindowManager {
             dragging = wid
             Log.debug("torn-off window \(wid) \(w.appName): waiting for the drop")
             // Let go before we saw it (a quick flick): place it now rather than leave it floating.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + Timing.tornOffDrop) { [weak self] in
                 if NSEvent.pressedMouseButtons & 1 == 0 { self?.resolveDrops() }
             }
             emit?("windowCreated", info(w))
@@ -1171,7 +1169,7 @@ final class WindowManager {
             }
             relayout(key, animated: true)
             if focusNeighbor && wasFocused, let n = neighbor {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+                DispatchQueue.main.asyncAfter(deadline: .now() + Timing.focusNeighbor) { [weak self] in
                     self?.focus(n)
                 }
             }
@@ -1227,7 +1225,7 @@ final class WindowManager {
             let dragged = mouseDown && notification == kAXWindowMovedNotification && pointerOn(w.id)
             if floating[w.id] != nil {
                 // Dragging a window taken out of the strip: it may be dropped back in.
-                let ours = CACurrentMediaTime() - (state[w.id].dockPlacedAt ?? 0) < 0.6
+                let ours = CACurrentMediaTime() - (state[w.id].dockPlacedAt ?? 0) < Timing.ozMoveEcho
                 if dragged && state[w.id].manualFloat && !ours {
                     state[w.id].pendingDrop = true
                     dragging = w.id
@@ -1262,7 +1260,7 @@ final class WindowManager {
         case kAXApplicationHiddenNotification:
             for w in windows.values where w.pid == pid { unmanage(w.id, focusNeighbor: false) }
         case kAXApplicationShownNotification:
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + Timing.shownScan) { [weak self] in
                 self?.scanApp(pid, mode: .scan)
             }
         default:
@@ -1285,7 +1283,7 @@ final class WindowManager {
         let pid = app.processIdentifier
         ensureObserver(pid)
         // The first window often exists before our observer is registered.
-        for delay in [0.3, 1.0] {
+        for delay in Timing.launchScans {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 self?.scanApp(pid, mode: .created)
             }
@@ -1325,7 +1323,7 @@ final class WindowManager {
         let bundle = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
         guard bundle != "com.apple.loginwindow", bundle != "com.apple.ScreenSaver.Engine" else { return }
         // Nor is macOS giving focus back to a window once it is unlocked.
-        let refocus = CACurrentMediaTime() - unlockedAt < 2
+        let refocus = CACurrentMediaTime() - unlockedAt < Timing.refocusAfterUnlock
         guard let w = find(el, pid: pid, askApp: false) else {
             if !refocus { restoreMaximized(focusing: el, pid: pid) }
             return
@@ -1458,7 +1456,7 @@ final class WindowManager {
             self.checkFrame(w)
         }
         w.frameCheck = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Timing.frameCheck, execute: item)
     }
 
     /// Reacts to the user resizing or dragging a tiled window.
@@ -1487,8 +1485,8 @@ final class WindowManager {
             // by its app (the green button again, Window > Zoom), it goes back into the strip,
             // as with a second double click.
             if !actual.approxEqual(expected, tolerance: 3), let (key, _) = locate(w.id) {
-                let byUser = (state[w.id].userDraggedAt.map { now - $0 < 3 } ?? false)
-                    || (state[w.id].userResizedAt.map { now - $0 < 3 } ?? false)
+                let byUser = (state[w.id].userDraggedAt.map { now - $0 < Timing.byUser } ?? false)
+                    || (state[w.id].userResizedAt.map { now - $0 < Timing.byUser } ?? false)
                 if !byUser && !fillsScreen(actual) {
                     Log.info("\(w.appName) stopped filling the screen; back into the strip")
                     w.lastFrame = actual
@@ -1502,10 +1500,10 @@ final class WindowManager {
         }
         // Moved by the mouse (the check runs once the button is released), not by its app.
         // Taken only here, past the guard: a check put off until later must still see it.
-        var dragged = state[w.id].take(\.userDraggedAt).map { now - $0 < 3 } ?? false
+        var dragged = state[w.id].take(\.userDraggedAt).map { now - $0 < Timing.byUser } ?? false
         if let d = dropped, d.id == w.id {
             dropped = nil
-            dragged = dragged || now - d.at < 5
+            dragged = dragged || now - d.at < Timing.dropLanding
         }
         let moved = abs(actual.minX - expected.minX) > 3 || abs(actual.minY - expected.minY) > 3
         let resizedH = abs(actual.height - expected.height) > 3
@@ -1513,14 +1511,14 @@ final class WindowManager {
         // Resized by an edge: macOS said so while the button was down. A size that differs
         // only because the app won't take Oz's (Steam can't get as narrow as its row) is a
         // plain move.
-        let edgeDragged = (resizedH || resizedW) && (state[w.id].userResizedAt.map { now - $0 < 3 } ?? false)
+        let edgeDragged = (resizedH || resizedW) && (state[w.id].userResizedAt.map { now - $0 < Timing.byUser } ?? false)
         // Made to fill the screen some other way than a title bar double click (Window >
         // Zoom, Fill, a shortcut): the same as one. Not macOS full screen, which Oz leaves alone.
         if !dragged && !edgeDragged && (moved || resizedH || resizedW) && fillsScreen(actual) {
             w.lastFrame = actual
             // Asked a moment later: full screen sets its flag as the window starts growing.
             let element = w.element
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + Timing.fullScreenFlag) { [weak self] in
                 self?.writer.perform(pid: w.pid) {
                     let native = AX.bool(element, "AXFullScreen") == true
                     DispatchQueue.main.async {
@@ -1576,13 +1574,13 @@ final class WindowManager {
         }
         // (Narrowing from the left edge moves the window sideways too: only its top must stay.)
         if moved || resizedW || resizedH { recordUndo(key) }
-        let byUser = state[w.id].take(\.userResizedAt).map { now - $0 < 3 } ?? false
+        let byUser = state[w.id].take(\.userResizedAt).map { now - $0 < Timing.byUser } ?? false
         if resizedW && !byUser {
             // The app changed the width itself (a window opening, an app's own resize): not
             // the user narrowing it. Put it back in its place at its size. An app that insists
             // on its width (asked again within 5 s) keeps it, but still goes back to its place
             // in the strip below, rather than being fought over every time.
-            if now - (state[w.id].sizeEnforcedAt ?? 0) > 5 {
+            if now - (state[w.id].sizeEnforcedAt ?? 0) > Timing.appInsists {
                 state[w.id].sizeEnforcedAt = now
                 Log.debug("window \(w.id) \(w.appName) moved/resized by its app; putting it back")
                 w.lastFrame = nil
@@ -1687,7 +1685,7 @@ final class WindowManager {
     /// Where a drag that left the window at `frame` ended: the cursor when the button was let
     /// go (if that was just now), else the window's middle.
     private func dropPoint(_ frame: CGRect) -> CGPoint {
-        if let up = lastMouseUp, CACurrentMediaTime() - up.at < 3 { return up.point }
+        if let up = lastMouseUp, CACurrentMediaTime() - up.at < Timing.mouseUpLanding { return up.point }
         return CGPoint(x: frame.midX, y: frame.midY)
     }
 
@@ -1830,7 +1828,7 @@ final class WindowManager {
     /// left it over the strip. Read where it is and put it back if need be.
     private func checkDocked(_ w: ManagedWindow, key: StripKey) {
         let id = w.id, element = w.element
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + Timing.dockCheck) { [weak self] in
             guard let self, self.floating[id] != nil else { return }
             self.writer.perform(pid: w.pid) {
                 let actual = AX.frame(element)
@@ -1931,7 +1929,7 @@ final class WindowManager {
             }
             return
         }
-        if now - since >= Self.bandDwell {
+        if now - since >= Timing.bandDwell {
             stopDwell()
             startAutoScroll(ds.key)
         }
@@ -2588,7 +2586,7 @@ final class WindowManager {
                         if self.overlays.isShowing(w.id) { self.park(w, screen: screen, size: size) }
                     }
                     state[w.id].pendingPark = item
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: item)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + Timing.parkAfterPeek, execute: item)
                 }
                 return
             }
@@ -2622,7 +2620,7 @@ final class WindowManager {
     private func refreshSnapshot(_ w: ManagedWindow, size: CGSize, screen: NSScreen) {
         let id = w.id
         let now = CACurrentMediaTime()
-        guard now - (state[id].lastResnap ?? 0) > 2, state[id].mark(\.resnapping) else { return }
+        guard now - (state[id].lastResnap ?? 0) > Timing.resnapEvery, state[id].mark(\.resnapping) else { return }
         state[id].lastResnap = now
         if w.parked, let lf = w.lastFrame, abs(lf.width - size.width) > 0.5 || abs(lf.height - size.height) > 0.5 {
             w.parked = false
@@ -2630,7 +2628,7 @@ final class WindowManager {
         }
         Log.debug("re-snapshot \(id) \(w.appName) at \(Int(size.width))x\(Int(size.height))")
         writer.perform(pid: w.pid) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + Timing.resnapCapture) { [weak self] in
                 guard let self else { return }
                 self.state[id].resnapping = false
                 guard self.windows[id] != nil else { return }
@@ -2701,7 +2699,7 @@ final class WindowManager {
             guard let image = snapshots.image(w.id, size: r.size) ?? overlays.currentImage(w.id) else { return false }
             overlays.show(w.id, image: image, full: r, clipTop: hardTop, stream: false, moving: true, below: dragging)
             if !w.parked {
-                if CACurrentMediaTime() - (state[w.id].proxyShownAt ?? 0) >= Self.standInSettle {
+                if CACurrentMediaTime() - (state[w.id].proxyShownAt ?? 0) >= Timing.standInSettle {
                     park(w, screen: screen, size: r.size)
                 } else {
                     placeReal(w, .frame(r), screen: screen, rowHeight: r.height)
@@ -2742,18 +2740,18 @@ final class WindowManager {
     /// fades. A fixed delay was too short for slow apps (100 ms and more), and the window
     /// vanished for a moment. The overlay gives up waiting after 0.6 s.
     private func handOver(_ w: ManagedWindow, to r: CGRect) {
-        overlays.handoff(w.id, to: r, delay: 0.6)
+        overlays.handoff(w.id, to: r, delay: Timing.handOverGiveUp)
         guard state[w.id].mark(\.handingOver) else { return }
         let id = w.id
         // Back under the stand-in, with its own shadow (worked out a frame after it shows).
         DispatchQueue.main.async { [weak self] in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.017) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Timing.shadowFrame) {
                 guard let self, !self.state[id].proxied, self.windows[id]?.parked == false else { return }
                 self.overlays.setRealBelow(id, true)
             }
         }
         writer.perform(pid: w.pid) { [weak self] in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Timing.handOverFade) {
                 guard let self else { return }
                 self.state[id].handingOver = false
                 // Not if it became a stand-in or a peek again meanwhile.
@@ -3194,7 +3192,7 @@ final class WindowManager {
         }
         // The overview captures window positions when it opens: let the moves land first.
         writer.waitUntilIdle()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + Timing.overviewOpen) { [weak self] in
             open()
             self?.watchOverview()
         }
@@ -3209,7 +3207,7 @@ final class WindowManager {
             guard let self, self.overviewActive else { t.invalidate(); return }
             if SystemActions.isOverviewShowing {
                 seen = true
-            } else if seen || CACurrentMediaTime() - start > 1.5 {
+            } else if seen || CACurrentMediaTime() - start > Timing.overviewGiveUp {
                 t.invalidate()
                 self.closeOverview()
             }
@@ -3220,7 +3218,7 @@ final class WindowManager {
     /// windows back as soon as its closing animation is over (~0.2 s) rather than when its
     /// window goes, half a second later, the windows standing in a pile meanwhile.
     private func overviewClosing() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.closeOverview() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Timing.overviewClosing) { [weak self] in self?.closeOverview() }
     }
 
     /// Puts every window from where the overview left it straight back into the strip, the
@@ -3360,7 +3358,7 @@ final class WindowManager {
     /// A window Oz made fill the screen for its app: if the app didn't take that size in both
     /// directions, it goes back.
     private func verifyForcedZoom(_ id: CGWindowID) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + max(settings.animationDuration, floatingAnimationDuration) + 0.4) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(settings.animationDuration, floatingAnimationDuration) + Timing.forcedZoomCheck) { [weak self] in
             guard let self, let w = self.windows[id] ?? self.floating[id] else { return }
             let element = w.element
             self.writer.perform(pid: w.pid) {
@@ -3406,7 +3404,7 @@ final class WindowManager {
                 let native = AX.bool(element, "AXFullScreen") == true
                 DispatchQueue.main.async {
                     guard let actual, !native, self.floating[id] === w,
-                          CACurrentMediaTime() - (self.state[id].dockPlacedAt ?? 0) > 0.6 else { return }
+                          CACurrentMediaTime() - (self.state[id].dockPlacedAt ?? 0) > Timing.ozMoveEcho else { return }
                     let fills = self.fillsScreen(actual)
                     if self.state[id].zoom == nil {
                         if fills, let before = w.lastFrame, !self.fillsScreen(before) {
@@ -3426,11 +3424,11 @@ final class WindowManager {
             }
         }
         w.frameCheck = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Timing.frameCheck, execute: item)
     }
 
     private func floatingZoomClick(_ id: CGWindowID, before: CGRect) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + Timing.zoomAnswer) { [weak self] in
             guard let self, let w = self.floating[id] else { return }
             let element = w.element
             self.writer.perform(pid: w.pid) {
@@ -3521,7 +3519,7 @@ final class WindowManager {
         let real = clickedFloating.flatMap { $0.id == wid ? $0.frame : nil } ?? frame
         zoomClick = (wid, key, real)
         // Give the app time to zoom, then read where the window ended up.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + Timing.zoomAnswer) { [weak self] in
             guard let self, let w = self.windows[wid] else { self?.zoomClick = nil; return }
             let element = w.element
             self.writer.perform(pid: w.pid) {
@@ -3551,7 +3549,7 @@ final class WindowManager {
         setMaximized(id, !isMax, current: actual)
         if isMaximized(id) || !isMax { return }
         // Restoring: the app's own un-zoom may land after ours; place it once more.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + Timing.unzoomAgain) { [weak self] in
             guard let self, let (key, _) = self.locate(id) else { return }
             self.windows[id]?.lastFrame = nil
             self.relayout(key, animated: false)
