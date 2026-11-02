@@ -167,7 +167,7 @@ final class InsertionLine {
     private let window: NSPanel
     private var shown: CGRect?
 
-    static let thickness: CGFloat = 16
+    static let thickness: CGFloat = 8
 
     init() {
         window = ActiveLookPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
