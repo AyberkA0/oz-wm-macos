@@ -45,16 +45,10 @@ enum SystemActions {
     /// Mission Control / App Exposé are up: the Dock then covers a whole screen with its
     /// overview window (its Dock bar never does).
     static var isOverviewShowing: Bool {
-        guard let list = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else {
-            return false
-        }
         let screens = NSScreen.screens.map { Geometry.ax($0.frame) }
-        return list.contains { w in
-            guard w[kCGWindowOwnerName as String] as? String == "Dock", (w[kCGWindowLayer as String] as? Int) == 20,
-                  let b = w[kCGWindowBounds as String] else { return false }
-            var r = CGRect.zero
-            CGRectMakeWithDictionaryRepresentation(b as! CFDictionary, &r)
-            return screens.contains { r.width >= $0.width - 1 && r.height >= $0.height - 1 }
+        return WindowServer.onScreen(desktop: true).contains { w in
+            guard w.owner == "Dock", w.layer == 20 else { return false }
+            return screens.contains { w.bounds.width >= $0.width - 1 && w.bounds.height >= $0.height - 1 }
         }
     }
 

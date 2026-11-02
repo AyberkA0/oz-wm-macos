@@ -932,8 +932,7 @@ final class WindowManager {
 
     /// A window above the others (picture in picture): not one of the strip's.
     private static func isRaised(_ id: CGWindowID) -> Bool {
-        let info = (CGWindowListCreateDescriptionFromArray([NSNumber(value: id)] as CFArray) as? [[String: Any]])?.first
-        return (info?[kCGWindowLayer as String] as? Int ?? 0) != 0
+        (WindowServer.window(id)?.layer ?? 0) != 0
     }
 
     /// An app whose windows Oz tiles: a regular one (in the Dock), or Steam's helper.
@@ -983,7 +982,7 @@ final class WindowManager {
         }
         let alive = Set(found.map(\.id))
         // One window-server query for all of them instead of one per window.
-        let onServer = Self.existingWindowIDs()
+        let onServer = WindowServer.allIDs()
         for id in Array(windows.keys) where !alive.contains(id) && !onServer.contains(id) {
             unmanage(id, focusNeighbor: false)
         }
@@ -1040,12 +1039,6 @@ final class WindowManager {
             guard let probe = WindowProbe.read(el, pid: pid) else { return }
             DispatchQueue.main.async { self?.add(probe, mode: mode) }
         }
-    }
-
-    /// Every window the window server knows of, on any desktop.
-    private static func existingWindowIDs() -> Set<CGWindowID> {
-        let list = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
-        return Set(list.compactMap { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value })
     }
 
     private func add(_ probe: WindowProbe, mode: AddMode) {
@@ -1400,12 +1393,7 @@ final class WindowManager {
     /// The mouse pointer is on the window (as the window server has it now, with a few
     /// points to spare for its edge).
     private func pointerOn(_ id: CGWindowID) -> Bool {
-        var value = UnsafeRawPointer(bitPattern: UInt(id))
-        guard let array = CFArrayCreate(nil, &value, 1, nil),
-              let info = (CGWindowListCreateDescriptionFromArray(array) as? [[String: Any]])?.first,
-              let b = info[kCGWindowBounds as String] else { return false }
-        var r = CGRect.zero
-        CGRectMakeWithDictionaryRepresentation(b as! CFDictionary, &r)
+        guard let r = WindowServer.window(id)?.bounds else { return false }
         let m = NSEvent.mouseLocation
         return r.insetBy(dx: -8, dy: -8).contains(CGPoint(x: m.x, y: Geometry.primaryHeight - m.y))
     }
@@ -2750,15 +2738,15 @@ final class WindowManager {
     }
 
     /// The real window is being moved back to `r` under its stand-in: the stand-in stays on
-    /// top, unclipped, until the app has applied the move (and the window server had a frame
-    /// to show it), then fades. A fixed delay was too short for slow apps (100 ms and more),
-    /// and the window vanished for a moment. Gives up waiting after 0.6 s.
+    /// top, unclipped, until the app has applied the move (its queue is through it), then
+    /// fades. A fixed delay was too short for slow apps (100 ms and more), and the window
+    /// vanished for a moment. The overlay gives up waiting after 0.6 s.
     private func handOver(_ w: ManagedWindow, to r: CGRect) {
         overlays.handoff(w.id, to: r, delay: 0.6)
         guard state[w.id].mark(\.handingOver) else { return }
         let id = w.id
-        whenMoved(id, to: r.origin) { [weak self] in
-            // Back under the stand-in, with its own shadow (worked out a frame after it shows).
+        // Back under the stand-in, with its own shadow (worked out a frame after it shows).
+        DispatchQueue.main.async { [weak self] in
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.017) {
                 guard let self, !self.state[id].proxied, self.windows[id]?.parked == false else { return }
                 self.overlays.setRealBelow(id, true)
@@ -2775,28 +2763,6 @@ final class WindowManager {
         }
     }
 
-    /// Calls `then` once the window server has window `id` at `origin` (AX coordinates): the
-    /// app applied the move, and the screen shows it from the next frame on, as it does a
-    /// change to the stand-ins made now. Checked every few milliseconds; after 0.6 s it calls
-    /// `then` anyway. `slack`: how near counts (an app may not put it exactly there).
-    private func whenMoved(_ id: CGWindowID, to origin: CGPoint, slack: CGFloat = 1, then: @escaping () -> Void) {
-        let timer = DispatchSource.makeTimerSource(queue: .main)
-        let start = CACurrentMediaTime()
-        timer.schedule(deadline: .now(), repeating: .milliseconds(4))
-        timer.setEventHandler {
-            let info = CGWindowListCreateDescriptionFromArray([NSNumber(value: id)] as CFArray) as? [[String: Any]]
-            let bounds = (info?.first?[kCGWindowBounds as String]).flatMap { CGRect(dictionaryRepresentation: $0 as! CFDictionary) }
-            if let b = bounds, abs(b.minX - origin.x) < slack, abs(b.minY - origin.y) < slack {
-                timer.cancel()
-                then()
-            } else if bounds == nil || CACurrentMediaTime() - start > 0.6 {
-                timer.cancel()
-                then()
-            }
-        }
-        timer.resume()
-    }
-
     private func park(_ w: ManagedWindow, screen: NSScreen, size wanted: CGSize? = nil) {
         guard !w.parked else { return }
         var size = w.lastFrame?.size ?? AX.size(w.element) ?? CGSize(width: 800, height: 600)
@@ -2809,7 +2775,7 @@ final class WindowManager {
         writer.move(w.id, pid: w.pid, element: w.element, to: CGRect(origin: p, size: size), setSize: setSize)
         // Gone from under its stand-in: the stand-in's own shadow takes over.
         let id = w.id
-        whenMoved(id, to: p, slack: 40) { [weak self] in
+        DispatchQueue.main.async { [weak self] in
             guard let self, self.windows[id]?.parked == true else { return }
             self.overlays.setRealBelow(id, false)
         }
@@ -3290,19 +3256,13 @@ final class WindowManager {
     /// own placements keep the outer gap, so they never reach every edge.)
     private func appFilledScreen(_ screen: NSScreen) -> Bool {
         let area = Geometry.ax(screen.visibleFrame)
-        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
-            as? [[String: Any]] ?? []
-        for info in list {
-            guard (info[kCGWindowLayer as String] as? Int) == 0, (info[kCGWindowOwnerPID as String] as? pid_t) != getpid(),
-                  let b = info[kCGWindowBounds as String] else { continue }
-            var r = CGRect.zero
-            CGRectMakeWithDictionaryRepresentation(b as! CFDictionary, &r)
+        for win in WindowServer.onScreen() where win.isOtherAppWindow {
+            let r = win.bounds, wid = win.id
             guard r.intersects(area) else { continue }
             // Only the frontmost window on this screen counts.
             guard r.width >= area.width - 4 && r.height >= area.height - 4 else { return false }
-            let wid = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value ?? 0
             let kind = windows[wid] != nil ? "in the strip" : floating[wid] != nil ? "in a region / floating" : "not Oz's"
-            Log.info("swipe ignored: \(info[kCGWindowOwnerName as String] ?? "?") fills the screen (\(Int(r.minX)),\(Int(r.minY)) \(Int(r.width))x\(Int(r.height)), \(kind))")
+            Log.info("swipe ignored: \(win.owner ?? "?") fills the screen (\(Int(r.minX)),\(Int(r.minY)) \(Int(r.width))x\(Int(r.height)), \(kind))")
             return true
         }
         return false
@@ -3387,19 +3347,8 @@ final class WindowManager {
     /// A floating or docked window's title bar was double clicked: if its app zooms it,
     /// remember where it was; if it unzooms it, forget.
     private func floatingWindow(at p: CGPoint) -> (id: CGWindowID, frame: CGRect)? {
-        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
-            as? [[String: Any]] ?? []
-        for info in list {
-            guard (info[kCGWindowLayer as String] as? Int) == 0, (info[kCGWindowOwnerPID as String] as? pid_t) != getpid(),
-                  let b = info[kCGWindowBounds as String] else { continue }
-            var r = CGRect.zero
-            CGRectMakeWithDictionaryRepresentation(b as! CFDictionary, &r)
-            guard r.contains(p) else { continue }
-            guard let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
-                  floating[id] != nil || windows[id] != nil else { return nil }
-            return (id, r)
-        }
-        return nil
+        guard let hit = WindowServer.appWindow(at: p), floating[hit.id] != nil || windows[hit.id] != nil else { return nil }
+        return (hit.id, hit.bounds)
     }
 
     /// No title bar of macOS's own (no close button), yet resizable: the app draws its own
@@ -3563,16 +3512,8 @@ final class WindowManager {
         guard enabled, !overviewActive else { return }
         // Topmost managed window under the click whose top strip (title bar / toolbar) was hit.
         let ids = Set(windows.keys)
-        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
-            as? [[String: Any]] ?? []
-        guard let hit = list.first(where: { info in
-            // Our own overlays (some kept in, transparent) are never the target.
-            guard (info[kCGWindowLayer as String] as? Int) == 0, (info[kCGWindowOwnerPID as String] as? pid_t) != getpid(),
-                  let b = info[kCGWindowBounds as String] else { return false }
-            var r = CGRect.zero
-            CGRectMakeWithDictionaryRepresentation(b as! CFDictionary, &r)
-            return r.contains(p)
-        }), let wid = (hit[kCGWindowNumber as String] as? NSNumber)?.uint32Value else { return }
+        // Our own overlays (some kept in, transparent) are never the target.
+        guard let wid = WindowServer.appWindow(at: p)?.id else { return }
         if floating[wid] != nil {
             if let c = clickedFloating, c.id == wid, p.y - c.frame.minY <= 56 { floatingZoomClick(wid, before: c.frame) }
             return

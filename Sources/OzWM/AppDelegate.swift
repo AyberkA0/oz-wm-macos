@@ -136,18 +136,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func frontAppUnderMouse() -> Bool {
         guard let front = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return false }
         let m = NSEvent.mouseLocation
-        let p = CGPoint(x: m.x, y: Geometry.primaryHeight - m.y)
-        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
-            as? [[String: Any]] ?? []
-        for info in list {
-            // Oz's own (the boards span whole screens) are never what the user swipes on.
-            guard (info[kCGWindowLayer as String] as? Int) == 0, (info[kCGWindowOwnerPID as String] as? pid_t) != getpid(),
-                  let b = info[kCGWindowBounds as String] else { continue }
-            var r = CGRect.zero
-            CGRectMakeWithDictionaryRepresentation(b as! CFDictionary, &r)
-            if r.contains(p) { return (info[kCGWindowOwnerPID as String] as? pid_t) == front }
-        }
-        return false
+        // Oz's own (the boards span whole screens) are never what the user swipes on.
+        guard let hit = WindowServer.appWindow(at: CGPoint(x: m.x, y: Geometry.primaryHeight - m.y)) else { return false }
+        return hit.pid == front
     }
 
     /// A pass-through app in front (Moonlight, a remote desktop) gets every key, and the
