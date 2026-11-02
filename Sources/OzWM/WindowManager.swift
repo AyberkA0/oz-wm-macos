@@ -3385,7 +3385,8 @@ final class WindowManager {
             return
         }
         guard let frame = w.lastFrame else { return }
-        restoreMaximized(at: frame, except: nil)
+        // Focus coming back to the window itself (from its app's dialog) leaves it as it is.
+        restoreMaximized(at: frame, except: nil, keep: w.id)
     }
 
     /// The same for a window Oz doesn't manage; a dialog of the full-screen window's own app
@@ -3399,16 +3400,16 @@ final class WindowManager {
         }
     }
 
-    private func restoreMaximized(at frame: CGRect, except pid: pid_t?) {
+    private func restoreMaximized(at frame: CGRect, except pid: pid_t?, keep: CGWindowID? = nil) {
         let center = CGPoint(x: frame.midX, y: frame.midY)
-        for (id, before) in appZoomed {
+        for (id, before) in appZoomed where id != keep {
             guard let w = floating[id] else { appZoomed[id] = nil; continue }
             guard w.pid != pid, Geometry.ax(Geometry.screen(containingAX: CGPoint(x: before.midX, y: before.midY))?.frame ?? .zero)
                 .contains(center) else { continue }
             unzoom(id)
         }
         for (key, screen) in visibleKeys() where Geometry.ax(screen.frame).contains(center) {
-            guard let id = maximizedID(key), let m = windows[id], m.pid != pid else { continue }
+            guard let id = maximizedID(key), id != keep, let m = windows[id], m.pid != pid else { continue }
             setMaximized(id, false)
         }
     }
