@@ -1661,8 +1661,7 @@ final class WindowManager {
         windows[w.id] = w
         state[w.id].manualFloat = false
         state[w.id].pendingDrop = false
-        state[w.id].forcedZoom = false
-        state[w.id].zoomedFrom = nil
+        state[w.id].zoom = nil
     }
 
     /// Forgets how the strip was showing a window: its stand-in, whether it is pinned or about
@@ -3261,7 +3260,7 @@ final class WindowManager {
             let r = win.bounds, wid = win.id
             guard r.intersects(area) else { continue }
             // Only the frontmost window on this screen counts.
-            guard r.width >= area.width - 4 && r.height >= area.height - 4 else { return false }
+            guard ScreenFill.reaches(r, area) else { return false }
             let kind = windows[wid] != nil ? "in the strip" : floating[wid] != nil ? "in a region / floating" : "not Oz's"
             Log.info("swipe ignored: \(win.owner ?? "?") fills the screen (\(Int(r.minX)),\(Int(r.minY)) \(Int(r.width))x\(Int(r.height)), \(kind))")
             return true
@@ -3334,7 +3333,7 @@ final class WindowManager {
     private func restoreMaximized(at frame: CGRect, except pid: pid_t?, keep: CGWindowID? = nil) {
         let center = CGPoint(x: frame.midX, y: frame.midY)
         for (id, before) in state.zoomed where id != keep {
-            guard let w = floating[id] else { state[id].zoomedFrom = nil; continue }
+            guard let w = floating[id] else { state[id].zoom = nil; continue }
             guard w.pid != pid, Geometry.ax(Geometry.screen(containingAX: CGPoint(x: before.midX, y: before.midY))?.frame ?? .zero)
                 .contains(center) else { continue }
             unzoom(id)
@@ -3369,12 +3368,11 @@ final class WindowManager {
                 DispatchQueue.main.async {
                     guard let actual, let screen = Geometry.screen(containingAX: CGPoint(x: actual.midX, y: actual.midY)) else { return }
                     let target = self.fullScreenFrame(screen)
-                    let fits = abs(actual.width - target.width) <= 4 && abs(actual.height - target.height) <= 4
-                    if fits { return }
+                    if ScreenFill.took(actual, target) { return }
                     if self.isMaximized(id) {
                         Log.info("\(w.appName) won't fill the screen (\(Int(actual.width))x\(Int(actual.height))); back")
                         self.setMaximized(id, false)
-                    } else if self.state[id].forcedZoom {
+                    } else if self.state[id].zoom?.byOz == true {
                         Log.info("\(w.appName) won't fill the screen (\(Int(actual.width))x\(Int(actual.height))); back")
                         self.unzoom(id)
                     }
@@ -3387,7 +3385,7 @@ final class WindowManager {
     private func fillsScreen(_ r: CGRect) -> Bool {
         guard let screen = Geometry.screen(containingAX: CGPoint(x: r.midX, y: r.midY)) else { return false }
         let v = Geometry.ax(screen.visibleFrame)
-        return r.width >= v.width * 0.95 && r.height >= v.height * 0.95
+        return ScreenFill.covers(r, visible: v)
     }
 
     private func isDocked(_ id: CGWindowID) -> Bool {
@@ -3410,16 +3408,16 @@ final class WindowManager {
                     guard let actual, !native, self.floating[id] === w,
                           CACurrentMediaTime() - (self.state[id].dockPlacedAt ?? 0) > 0.6 else { return }
                     let fills = self.fillsScreen(actual)
-                    if self.state[id].zoomedFrom == nil {
+                    if self.state[id].zoom == nil {
                         if fills, let before = w.lastFrame, !self.fillsScreen(before) {
-                            self.state[id].zoomedFrom = before
+                            self.state[id].zoom = .init(before: before, byOz: false)
                             w.zoomedFrame = actual
                             Log.info("\(w.appName) filled the screen; zoomed floating \(id)")
                         } else if !fills && !self.isDocked(id) {
                             w.lastFrame = actual
                         }
-                    } else if !fills && !self.state[id].forcedZoom {
-                        self.state[id].zoomedFrom = nil
+                    } else if !fills && self.state[id].zoom?.byOz == false {
+                        self.state[id].zoom = nil
                         w.zoomedFrame = nil
                         if !self.isDocked(id) { w.lastFrame = actual }
                         Log.info("\(w.appName) stopped filling the screen; floating \(id) unzoomed")
@@ -3439,26 +3437,25 @@ final class WindowManager {
                 let actual = AX.frame(element), own = Self.drawsOwnTitleBar(element)
                 DispatchQueue.main.async {
                     guard let actual, self.floating[id] != nil else { return }
-                    if self.state[id].forcedZoom {
+                    if self.state[id].zoom?.byOz == true {
                         self.unzoom(id)
-                    } else if self.state[id].zoomedFrom != nil {
+                    } else if self.state[id].zoom != nil {
                         // A double click near the top that didn't unzoom it (Blender's own
                         // header is there) keeps it zoomed.
                         let zoomed = self.floating[id]?.zoomedFrame ?? actual
-                        if actual.width * actual.height < zoomed.width * zoomed.height - 400 * 20 {
-                            self.state[id].zoomedFrom = nil
+                        if ScreenFill.shrank(actual, from: zoomed) {
+                            self.state[id].zoom = nil
                             Log.info("app unzoomed floating \(id)")
                         }
-                    } else if actual.width * actual.height > before.width * before.height + 400 * 20 {
-                        self.state[id].zoomedFrom = before
+                    } else if ScreenFill.grew(actual, from: before) {
+                        self.state[id].zoom = .init(before: before, byOz: false)
                         self.floating[id]?.zoomedFrame = actual
                         Log.info("app zoomed floating \(id)")
                     } else if own, let screen = Geometry.screen(containingAX: CGPoint(x: actual.midX, y: actual.midY)) {
                         let target = self.fullScreenFrame(screen)
-                        self.state[id].zoomedFrom = actual
+                        self.state[id].zoom = .init(before: actual, byOz: true)
                         self.floating[id]?.zoomedFrame = target
-                        self.state[id].forcedZoom = true
-                        self.animateFloating(w, from: actual, to: target) { [weak self] in self?.state[id].forcedZoom == true }
+                        self.animateFloating(w, from: actual, to: target) { [weak self] in self?.state[id].zoom?.byOz == true }
                         Log.info("zoomed floating \(id) \(w.appName) for its app")
                         self.verifyForcedZoom(id)
                     }
@@ -3470,10 +3467,9 @@ final class WindowManager {
     /// Puts an app-zoomed floating window back where it was, shrinking it there over
     /// `animationDuration` (a slow app just shows fewer of the steps).
     private func unzoom(_ id: CGWindowID) {
-        state[id].forcedZoom = false
-        guard let before = state[id].take(\.zoomedFrom), let w = floating[id] else { return }
+        guard let before = state[id].take(\.zoom)?.before, let w = floating[id] else { return }
         Log.info("unzoom floating \(id) \(w.appName)")
-        animateFloating(w, from: w.zoomedFrame ?? w.lastFrame, to: before) { [weak self] in self?.state[id].zoomedFrom == nil }
+        animateFloating(w, from: w.zoomedFrame ?? w.lastFrame, to: before) { [weak self] in self?.state[id].zoom == nil }
     }
 
     /// How long a floating window takes to grow or shrink (a slow app just shows fewer steps).
@@ -3539,7 +3535,7 @@ final class WindowManager {
         guard let zc = zoomClick, zc.id == id else { return }
         zoomClick = nil
         guard let actual, windows[id] != nil else { return }
-        let resized = abs(actual.width - zc.frame.width) > 20 || abs(actual.height - zc.frame.height) > 20
+        let resized = ScreenFill.resized(actual, from: zc.frame)
         let isMax = isMaximized(id)
         if !resized && !isMax {
             // A title bar of the app's own drawing (Steam) does nothing on a double click: fill

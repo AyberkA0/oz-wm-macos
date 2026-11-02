@@ -42,16 +42,21 @@ struct WindowState: Equatable {
     var manualFloat = false
     /// Being dragged (or a tab being torn off): placed when the mouse is let go.
     var pendingDrop = false
-    /// Zoomed by its app (title bar double click), with where it was before: put back there
-    /// once another window gets focus.
-    var zoomedFrom: CGRect?
-    /// Made to fill the screen by Oz itself (its app ignored the double click).
-    var forcedZoom = false
+    /// Made to fill the screen (see `Zoom`).
+    var zoom: Zoom?
     /// When Oz last moved it (a docked window's move notifications aren't a user drag).
     var dockPlacedAt: CFTimeInterval?
     /// Sent to the Dock: brought back, it goes back where it was (its region and place)
     /// rather than into the strip.
     var minimized: Minimized?
+
+    /// A floating window filling the screen: where it was before (it goes back there once
+    /// another window gets focus), and whether Oz did it itself (its app zoomed it, or
+    /// ignored the double click and Oz made it fill the screen).
+    struct Zoom: Equatable {
+        let before: CGRect
+        let byOz: Bool
+    }
 
     struct Minimized: Equatable {
         let manual: Bool
@@ -104,7 +109,7 @@ struct WindowStates {
 
     /// The windows their app zoomed, and where each was before.
     var zoomed: [(id: CGWindowID, before: CGRect)] {
-        all.compactMap { id, s in s.zoomedFrom.map { (id, $0) } }
+        all.compactMap { id, s in s.zoom.map { (id, $0.before) } }
     }
 
     mutating func update(_ ids: some Sequence<CGWindowID>, _ change: (inout WindowState) -> Void) {
