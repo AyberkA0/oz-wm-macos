@@ -121,12 +121,11 @@ final class WindowManager {
     private var strips: [StripKey: Strip] = [:]
     private var windows: [CGWindowID: ManagedWindow] = [:]
     private var floating: [CGWindowID: ManagedWindow] = [:]
+    /// What Oz notes about each window (see `WindowState`).
+    private var state = WindowStates()
     private var observers: [pid_t: AppObserver] = [:]
-    private var minHeights: [CGWindowID: CGFloat] = [:]
     let snapshots = SnapshotCache()
     private let overlays = OverlayManager()
-    /// Windows waiting for their stand-in to reach the screen before being moved away.
-    private var pendingParks: [CGWindowID: DispatchWorkItem] = [:]
 
     private struct GestureState {
         let key: StripKey; let strip: Strip; let screen: NSScreen; let startScroll: CGFloat
@@ -144,22 +143,10 @@ final class WindowManager {
     /// The window the user is resizing with the mouse right now; its neighbours reflow live.
     private var liveResize: (id: CGWindowID, key: StripKey)?
     private var liveReadInFlight = false
-    /// New windows sent straight to their final frame; the layout leaves them alone while
-    /// the rest of the strip animates around them.
-    private var pinned = Set<CGWindowID>()
     /// Window to focus once its strip's scroll animation ends. Activating makes the app
     /// redraw in its focused look, and while it does it answers moves 50-70 ms late
     /// (measured), so focusing mid-glide made that window trail behind and then jump.
     private var pendingActivation: [StripKey: CGWindowID] = [:]
-    /// Windows of slow apps drawn by a stand-in while the strip moves (real one parked).
-    private var proxied = Set<CGWindowID>()
-    /// When each stand-in was put up: the real window stays underneath, moving with it, until
-    /// the stand-in has surely reached the screen (a new or resized overlay window takes a
-    /// frame or two), and only then goes off screen. Parking it at once left a frame with
-    /// neither on screen: the window flickered as a swipe started.
-    private var proxyShownAt: [CGWindowID: CFTimeInterval] = [:]
-    /// Stand-ins waiting for their real window to be back before fading (see `handOver`).
-    private var handingOver = Set<CGWindowID>()
     private static let standInSettle: CFTimeInterval = 0.06
     /// Last focused window as reported by AX notifications (avoids asking the app).
     private var trackedFocus: CGWindowID?
@@ -253,38 +240,15 @@ final class WindowManager {
     private var saveTimer: Timer?
     /// A double click just landed on this window's title bar; its app may zoom it.
     private var zoomClick: (id: CGWindowID, key: StripKey, frame: CGRect)?
-    /// Floating and docked windows their app zoomed (title bar double click), with where
-    /// they were before: put back there once another window gets focus.
-    private var appZoomed: [CGWindowID: CGRect] = [:]
-    /// Floating and docked windows sent to the Dock: brought back, they go back there (the
-    /// region and place they had) rather than into the strip.
-    private var minimizedFloating: [CGWindowID: (manual: Bool, dock: (key: StripKey, region: Int, index: Int)?)] = [:]
     /// The managed window under the last single click and where it was: by the time Oz sees
     /// a double click (a global event, after the app's), its app may have zoomed it already.
     private var clickedFloating: (id: CGWindowID, frame: CGRect)?
-    /// Floating windows Oz made fill the screen itself (their app ignored the double click).
-    private var forcedZoom: Set<CGWindowID> = []
-    /// Floating windows the user took out of the strip (dragged out of the scroll area, a
-    /// tab torn off outside it, toggleFloat): dropping one into a scroll area tiles it again.
-    /// Windows floating because of a rule or a fixed size are not in here.
-    private var manualFloat = Set<CGWindowID>()
-    /// Tiled windows the user is dragging by the mouse (our own moves aren't).
-    private var userDragged: [CGWindowID: CFTimeInterval] = [:]
-    /// Tiled windows the user resized by an edge with the mouse, and when.
-    private var userResized: [CGWindowID: CFTimeInterval] = [:]
-    /// When Oz last put a window back to the size it gave it (see `compareFrame`): an app that
-    /// insists on its own width isn't fought over and over.
-    private var sizeEnforcedAt: [CGWindowID: CFTimeInterval] = [:]
-    /// Floating windows being dragged (or a tab being torn off): placed when the mouse is let go.
-    private var pendingDrops = Set<CGWindowID>()
     /// Where (AX coordinates) and when the left mouse button was last let go: a drag "lands"
     /// in the zone or region that holds the cursor at that moment.
     private var lastMouseUp: (point: CGPoint, at: CFTimeInterval)?
     /// Windows tiled in the regions outside the Oz zone (see `OutsideRegions`), per desktop:
     /// region index -> windows in order along the region's long side.
     private var docks: [StripKey: [Int: [CGWindowID]]] = [:]
-    /// When Oz last moved a docked window (its move notifications aren't a user drag).
-    private var dockPlacedAt: [CGWindowID: CFTimeInterval] = [:]
     /// The window the user is dragging right now (from its move notifications), whose
     /// landing place the drop preview shows.
     private var dragging: CGWindowID?
@@ -389,7 +353,7 @@ final class WindowManager {
         writer.onMinHeight = { [weak self] id, h in
             // The app refused to get that small at the top edge: remember it, re-evaluate.
             guard let self else { return }
-            self.minHeights[id] = h
+            self.state[id].minHeight = h
             if let (key, _) = self.locate(id) { self.markDirty(key) }
         }
         if settings.topOverflow == .slide { snapshots.requestPermissionOnce() }
@@ -499,10 +463,10 @@ final class WindowManager {
         guard let target else { return false }
         beginTransition(key, recordUndo: false)
         for saved in target.rows.flatMap(\.windows) where windows[saved.id] == nil {
-            guard let w = floating[saved.id], manualFloat.contains(saved.id) else { continue }
+            guard let w = floating[saved.id], state[saved.id].manualFloat else { continue }
             undock(saved.id)
             floating.removeValue(forKey: saved.id)
-            manualFloat.remove(saved.id)
+            state[saved.id].manualFloat = false
             windows[saved.id] = w
             s.insertRow(saved.id, height: vh / 2, before: nil)
             if settings.animationDuration > 0, let f = w.lastFrame { pendingFrom[key, default: [:]][saved.id] = f }
@@ -533,13 +497,16 @@ final class WindowManager {
         for key in Array(maximized.keys) where !live.contains(key) { maximized.removeValue(forKey: key) }
         for key in Array(pendingActivation.keys) where !live.contains(key) { pendingActivation.removeValue(forKey: key) }
         let now = CACurrentMediaTime()
-        for (id, t) in userDragged where now - t > 10 { userDragged.removeValue(forKey: id) }
-        for (id, t) in userResized where now - t > 10 { userResized.removeValue(forKey: id) }
-        for (id, t) in sizeEnforcedAt where now - t > 10 { sizeEnforcedAt.removeValue(forKey: id) }
-        for (id, t) in lastResnap where now - t > 10 || windows[id] == nil { lastResnap.removeValue(forKey: id) }
-        for (id, t) in dockPlacedAt where now - t > 10 { dockPlacedAt.removeValue(forKey: id) }
+        state.updateAll { id, s in
+            func recent(_ t: CFTimeInterval?) -> CFTimeInterval? { t.flatMap { now - $0 > 10 ? nil : $0 } }
+            s.userDraggedAt = recent(s.userDraggedAt)
+            s.userResizedAt = recent(s.userResizedAt)
+            s.sizeEnforcedAt = recent(s.sizeEnforcedAt)
+            s.lastResnap = windows[id] == nil ? nil : recent(s.lastResnap)
+            s.dockPlacedAt = recent(s.dockPlacedAt)
+            if !s.proxied { s.proxyShownAt = nil }
+        }
         for key in Array(docks.keys) where docks[key]?.isEmpty ?? true { docks.removeValue(forKey: key) }
-        for id in Array(proxyShownAt.keys) where !proxied.contains(id) { proxyShownAt.removeValue(forKey: id) }
     }
 
     // MARK: Presets
@@ -651,7 +618,7 @@ final class WindowManager {
             guard let w = windows.removeValue(forKey: id) else { continue }
             strip.remove(id)
             floating[id] = w
-            manualFloat.insert(id)
+            state[id].manualFloat = true
         }
         if !docked.isEmpty { docks[key] = docked }
         let vh = viewportHeight(key)
@@ -717,7 +684,7 @@ final class WindowManager {
                 guard let w = windows.removeValue(forKey: id) else { continue }
                 strip.remove(id)
                 floating[id] = w
-                manualFloat.insert(id)
+                state[id].manualFloat = true
             }
             if !docked.isEmpty { docks[key] = docked }
             strip.scrollY = strip.clampScroll(strip.scrollY, viewportHeight: vh, gap: settings.gap)
@@ -839,10 +806,10 @@ final class WindowManager {
         guard let strip = strips[key], let screen = visibleScreen(key) else { return }
         let p = params(screen)
         Log.debug("[dump] area=\(scrollArea(screen)) hardTop=\(p.hardTop) hardBottom=\(p.hardBottom) cut=\(p.cutBottom) scroll=\(strip.scrollY)/\(strip.renderScrollY) moving=\(isMoving)")
-        for item in strip.layout(p, scroll: strip.renderScrollY, minHeights: minHeights) {
+        for item in strip.layout(p, scroll: strip.renderScrollY, minHeights: state.minHeights) {
             guard let w = windows[item.id] else { continue }
             let id = w.id, name = w.appName, parked = w.parked, shrunk = w.shrunk, last = w.lastFrame
-            let overlay = overlays.isShowing(id), prox = proxied.contains(id), pin = pinned.contains(id)
+            let overlay = overlays.isShowing(id), prox = state[id].proxied, pin = state[id].pinned
             let element = w.element
             writer.perform(pid: w.pid) {
                 let actual = AX.frame(element)
@@ -899,12 +866,12 @@ final class WindowManager {
         var offset: CGFloat = 0
         let hidden = restoreFrames(strip, key: key, offset: &offset)
         for id in strip.windowIDs {
-            pinned.remove(id)
-            proxied.remove(id)
-            pendingParks.removeValue(forKey: id)?.cancel()
+            state[id].pinned = false
+            state[id].proxied = false
+            state[id].take(\.pendingPark)?.cancel()
             overlays.remove(id)
             snapshots.remove(id)
-            minHeights.removeValue(forKey: id)
+            state[id].minHeight = nil
             windows.removeValue(forKey: id)?.frameCheck?.cancel()
         }
         // Queued after any pending move of the same window, so it wins.
@@ -928,16 +895,18 @@ final class WindowManager {
             strips.removeAll()
             windows.removeAll()
             floating.removeAll()
-            minHeights.removeAll()
+            state.updateAll { _, s in
+                s.minHeight = nil
+                s.manualFloat = false
+                s.userDraggedAt = nil
+                s.pendingDrop = false
+            }
             maximized.removeAll()
             zoomClick = nil
-            manualFloat.removeAll()
             undoStacks.removeAll()
-            userDragged.removeAll()
             dragging = nil
             dropPreview.hide()
             insertionLine.hide()
-            pendingDrops.removeAll()
             docks.removeAll()
             gesture = nil
         }
@@ -1109,9 +1078,9 @@ final class WindowManager {
         let secondary = w.bundleID == Self.steamHelper ? probe.title != "Steam"
             : Self.browsers.contains(w.bundleID ?? "") ? Self.isRaised(wid)
             : !probe.main || (w.bundleID == "org.blenderfoundation.blender" && !probe.title.contains("Blender"))
-        if let m = minimizedFloating.removeValue(forKey: wid) {
+        if let m = state[wid].take(\.minimized) {
             floating[wid] = w
-            if m.manual { manualFloat.insert(wid) }
+            if m.manual { state[wid].manualFloat = true }
             if let d = m.dock {
                 var list = (docks[d.key]?[d.region] ?? []).filter { floating[$0] != nil }
                 list.insert(wid, at: min(d.index, list.count))
@@ -1133,8 +1102,8 @@ final class WindowManager {
             // Born under a dragging mouse: a tab torn off its window. Where it's let go decides
             // whether it joins the strip (inside a scroll area) or floats there (outside).
             floating[wid] = w
-            manualFloat.insert(wid)
-            pendingDrops.insert(wid)
+            state[wid].manualFloat = true
+            state[wid].pendingDrop = true
             dragging = wid
             Log.debug("torn-off window \(wid) \(w.appName): waiting for the drop")
             // Let go before we saw it (a quick flick): place it now rather than leave it floating.
@@ -1177,12 +1146,12 @@ final class WindowManager {
             // Move the new window once, straight to where it will end up, instead of letting it
             // ride the scroll animation (it would first be parked off screen, then slide in).
             if visibleScreen(key) != nil, abs(strip.renderScrollY - strip.scrollY) > 1,
-               let item = strip.layout(params(screen), scroll: strip.scrollY, minHeights: minHeights)
+               let item = strip.layout(params(screen), scroll: strip.scrollY, minHeights: state.minHeights)
                 .first(where: { $0.id == wid }), case .frame(let r) = item.placement {
                 writer.move(wid, pid: pid, element: el, to: r, setSize: true)
                 w.lastFrame = r
                 w.needsSizeCheck = true
-                pinned.insert(wid)
+                state[wid].pinned = true
                 // Start moving the neighbours only once the app has actually moved the new
                 // window (Finder takes ~60 ms); otherwise they clear the space first and the
                 // desktop shows through for a frame or two.
@@ -1199,18 +1168,18 @@ final class WindowManager {
     }
 
     private func unmanage(_ id: CGWindowID, focusNeighbor: Bool) {
-        pinned.remove(id)
-        proxied.remove(id)
-        proxyShownAt.removeValue(forKey: id)
-        pendingParks.removeValue(forKey: id)?.cancel()
+        state[id].pinned = false
+        state[id].proxied = false
+        state[id].proxyShownAt = nil
+        state[id].take(\.pendingPark)?.cancel()
         overlays.remove(id)
         snapshots.remove(id)
         forgetFloating(id)
-        userDragged.removeValue(forKey: id)
-        lastResnap.removeValue(forKey: id)
-        userResized.removeValue(forKey: id)
-        sizeEnforcedAt.removeValue(forKey: id)
-        minHeights.removeValue(forKey: id)
+        state[id].userDraggedAt = nil
+        state[id].lastResnap = nil
+        state[id].userResizedAt = nil
+        state[id].sizeEnforcedAt = nil
+        state[id].minHeight = nil
         guard let w = windows.removeValue(forKey: id) else { return }
         w.frameCheck?.cancel()
         guard let (key, strip) = locate(id) else { return }
@@ -1280,9 +1249,9 @@ final class WindowManager {
             let dragged = mouseDown && notification == kAXWindowMovedNotification && pointerOn(w.id)
             if floating[w.id] != nil {
                 // Dragging a window taken out of the strip: it may be dropped back in.
-                let ours = CACurrentMediaTime() - (dockPlacedAt[w.id] ?? 0) < 0.6
-                if dragged && manualFloat.contains(w.id) && !ours {
-                    pendingDrops.insert(w.id)
+                let ours = CACurrentMediaTime() - (state[w.id].dockPlacedAt ?? 0) < 0.6
+                if dragged && state[w.id].manualFloat && !ours {
+                    state[w.id].pendingDrop = true
                     dragging = w.id
                     updateDropPreview()
                 }
@@ -1300,12 +1269,12 @@ final class WindowManager {
             if notification == kAXWindowResizedNotification && mouseDown {
                 // Resizing, not moving: no landing place to show.
                 resizeDrag = w.id
-                userResized[w.id] = CACurrentMediaTime()
+                state[w.id].userResizedAt = CACurrentMediaTime()
                 if dragging == w.id { dragging = nil; dropPreview.hide() }
                 trackLiveResize(w)
             }
             if dragged {
-                userDragged[w.id] = CACurrentMediaTime()
+                state[w.id].userDraggedAt = CACurrentMediaTime()
                 if liveResize == nil && resizeDrag != w.id {
                     dragging = w.id
                     updateDropPreview()
@@ -1545,8 +1514,8 @@ final class WindowManager {
             // by its app (the green button again, Window > Zoom), it goes back into the strip,
             // as with a second double click.
             if !actual.approxEqual(expected, tolerance: 3), let (key, _) = locate(w.id) {
-                let byUser = (userDragged[w.id].map { now - $0 < 3 } ?? false)
-                    || (userResized[w.id].map { now - $0 < 3 } ?? false)
+                let byUser = (state[w.id].userDraggedAt.map { now - $0 < 3 } ?? false)
+                    || (state[w.id].userResizedAt.map { now - $0 < 3 } ?? false)
                 if !byUser && !fillsScreen(actual) {
                     Log.info("\(w.appName) stopped filling the screen; back into the strip")
                     w.lastFrame = actual
@@ -1560,7 +1529,7 @@ final class WindowManager {
         }
         // Moved by the mouse (the check runs once the button is released), not by its app.
         // Taken only here, past the guard: a check put off until later must still see it.
-        var dragged = userDragged.removeValue(forKey: w.id).map { now - $0 < 3 } ?? false
+        var dragged = state[w.id].take(\.userDraggedAt).map { now - $0 < 3 } ?? false
         if let d = dropped, d.id == w.id {
             dropped = nil
             dragged = dragged || now - d.at < 5
@@ -1571,7 +1540,7 @@ final class WindowManager {
         // Resized by an edge: macOS said so while the button was down. A size that differs
         // only because the app won't take Oz's (Steam can't get as narrow as its row) is a
         // plain move.
-        let edgeDragged = (resizedH || resizedW) && (userResized[w.id].map { now - $0 < 3 } ?? false)
+        let edgeDragged = (resizedH || resizedW) && (state[w.id].userResizedAt.map { now - $0 < 3 } ?? false)
         // Made to fill the screen some other way than a title bar double click (Window >
         // Zoom, Fill, a shortcut): the same as one. Not macOS full screen, which Oz leaves alone.
         if !dragged && !edgeDragged && (moved || resizedH || resizedW) && fillsScreen(actual) {
@@ -1634,14 +1603,14 @@ final class WindowManager {
         }
         // (Narrowing from the left edge moves the window sideways too: only its top must stay.)
         if moved || resizedW || resizedH { recordUndo(key) }
-        let byUser = userResized.removeValue(forKey: w.id).map { now - $0 < 3 } ?? false
+        let byUser = state[w.id].take(\.userResizedAt).map { now - $0 < 3 } ?? false
         if resizedW && !byUser {
             // The app changed the width itself (a window opening, an app's own resize): not
             // the user narrowing it. Put it back in its place at its size. An app that insists
             // on its width (asked again within 5 s) keeps it, but still goes back to its place
             // in the strip below, rather than being fought over every time.
-            if now - (sizeEnforcedAt[w.id] ?? 0) > 5 {
-                sizeEnforcedAt[w.id] = now
+            if now - (state[w.id].sizeEnforcedAt ?? 0) > 5 {
+                state[w.id].sizeEnforcedAt = now
                 Log.debug("window \(w.id) \(w.appName) moved/resized by its app; putting it back")
                 w.lastFrame = nil
                 relayout(key, animated: false)
@@ -1690,21 +1659,21 @@ final class WindowManager {
     // MARK: Dragging in and out of the scroll area
 
     private func rememberMinimized(_ id: CGWindowID) {
-        var dock: (key: StripKey, region: Int, index: Int)?
+        var dock: WindowState.DockPlace?
         for (key, regions) in docks {
             for (i, ids) in regions {
-                if let j = ids.firstIndex(of: id) { dock = (key, i, j) }
+                if let j = ids.firstIndex(of: id) { dock = .init(key: key, region: i, index: j) }
             }
         }
-        minimizedFloating[id] = (manualFloat.contains(id), dock)
+        state[id].minimized = .init(manual: state[id].manualFloat, dock: dock)
     }
 
     private func forgetFloating(_ id: CGWindowID) {
         undock(id)
-        dockPlacedAt.removeValue(forKey: id)
+        state[id].dockPlacedAt = nil
         floating.removeValue(forKey: id)
-        manualFloat.remove(id)
-        pendingDrops.remove(id)
+        state[id].manualFloat = false
+        state[id].pendingDrop = false
     }
 
     /// Dropped where a custom scroll area leaves the screen free (a whole-screen area has no outside).
@@ -1736,12 +1705,12 @@ final class WindowManager {
         strip.remove(w.id)
         windows.removeValue(forKey: w.id)
         floating[w.id] = w
-        manualFloat.insert(w.id)
-        pinned.remove(w.id)
-        proxied.remove(w.id)
-        pendingParks.removeValue(forKey: w.id)?.cancel()
+        state[w.id].manualFloat = true
+        state[w.id].pinned = false
+        state[w.id].proxied = false
+        state[w.id].take(\.pendingPark)?.cancel()
         overlays.remove(w.id)
-        minHeights.removeValue(forKey: w.id)
+        state[w.id].minHeight = nil
         w.lastFrame = frame
         w.parked = false
         w.shrunk = false
@@ -1760,9 +1729,9 @@ final class WindowManager {
 
     /// The mouse was let go: place the floating windows that were being dragged.
     private func resolveDrops() {
-        guard !pendingDrops.isEmpty else { return }
-        let ids = pendingDrops
-        pendingDrops.removeAll()
+        let ids = state.ids { $0.pendingDrop }
+        guard !ids.isEmpty else { return }
+        state.update(ids) { $0.pendingDrop = false }
         for id in ids {
             guard let w = floating[id] else { continue }
             let element = w.element
@@ -1777,7 +1746,7 @@ final class WindowManager {
     /// nearest to where it was dropped, sliding in from there; outside, in one of the regions
     /// around the zone, it is tiled in that region; anywhere else it stays put.
     private func drop(_ id: CGWindowID, at frame: CGRect?) {
-        guard enabled, let frame, let w = floating[id], manualFloat.contains(id) else { return }
+        guard enabled, let frame, let w = floating[id], state[id].manualFloat else { return }
         // Where the user left it, not where Oz last put it: a window dropped back into its own
         // region still has to be fitted there again.
         w.lastFrame = frame
@@ -1788,7 +1757,7 @@ final class WindowManager {
         }
         undock(id)
         floating.removeValue(forKey: id)
-        manualFloat.remove(id)
+        state[id].manualFloat = false
         windows[id] = w
         let slot = zoneSlot(at: point, dragging: id)?.slot ?? .row(before: nil)
         Log.debug("dropped into the scroll area: \(id) \(w.appName) \(slot)")
@@ -1802,7 +1771,7 @@ final class WindowManager {
     private func zoneSlot(at p: CGPoint, dragging id: CGWindowID) -> (key: StripKey, slot: DropSlot, line: CGRect)? {
         guard let (key, screen) = dropTarget(p) else { return nil }
         let strip = strips[key] ?? Strip()
-        guard let r = strip.dropSlot(at: p, dragging: id, params: params(screen), minHeights: minHeights,
+        guard let r = strip.dropSlot(at: p, dragging: id, params: params(screen), minHeights: state.minHeights,
                                      lineThickness: InsertionLine.thickness) else { return nil }
         return (key, r.slot, r.line)
     }
@@ -1855,7 +1824,7 @@ final class WindowManager {
         let key = plan.key, i = plan.region
         docks[key, default: [:]][i] = list
         floating[w.id] = w
-        manualFloat.insert(w.id)
+        state[w.id].manualFloat = true
         Log.debug("docked \(w.id) \(w.appName) in region \(i) (\(list.count) there)")
         layoutDocks(key)
         checkDocked(w, key: key)
@@ -1919,7 +1888,7 @@ final class WindowManager {
         let p = CGPoint(x: m.x, y: Geometry.primaryHeight - m.y)
         var target: CGRect?
         var line: CGRect?
-        if windows[id] != nil || (floating[id] != nil && manualFloat.contains(id)) {
+        if windows[id] != nil || (floating[id] != nil && state[id].manualFloat) {
             if dropTarget(p) != nil {
                 // In the zone: the split line it would go in (none if it would stay put).
                 line = zoneSlot(at: p, dragging: id)?.line
@@ -2059,7 +2028,7 @@ final class WindowManager {
             for (id, f) in zip(live, OutsideRegions.frames(in: regions[i], count: live.count, gap: settings.outerGap)) {
                 guard let w = floating[id] else { continue }
                 if let lf = w.lastFrame, lf.approxEqual(f) { continue }
-                dockPlacedAt[id] = now
+                state[id].dockPlacedAt = now
                 writer.move(id, pid: w.pid, element: w.element, to: f, setSize: true)
                 w.lastFrame = f
             }
@@ -2203,7 +2172,7 @@ final class WindowManager {
             guard !appFilledScreen(screen) else { return }
             stopAnimation(key)
             pendingActivation[key] = nil
-            pinned.subtract(strip.windowIDs)
+            state.update(strip.windowIDs) { $0.pinned = false }
             strip.scrollY = strip.renderScrollY
             let vh = viewport(screen).height
             var range = 0...strip.maxScroll(viewportHeight: vh, gap: settings.gap)
@@ -2429,7 +2398,7 @@ final class WindowManager {
     private func animate(_ key: StripKey, duration: Double, spring: Animation.Spring? = nil) {
         guard let strip = strips[key] else { return }
         // Retargeted mid-way: a pinned window's final frame is no longer final.
-        if animations[key] != nil { pinned.subtract(strip.windowIDs) }
+        if animations[key] != nil { state.update(strip.windowIDs) { $0.pinned = false } }
         if let from = pendingFrom.removeValue(forKey: key) {
             transitions[key] = from
         } else if transitions[key] != nil {
@@ -2473,7 +2442,7 @@ final class WindowManager {
         guard let strip = strips[key], let screen = visibleScreen(key) else { return [:] }
         let from = transitions[key], t = progress(key), maxID = maximizedID(key)
         var out: [CGWindowID: CGRect] = [:]
-        for item in strip.layout(params(screen), scroll: strip.renderScrollY, minHeights: minHeights) {
+        for item in strip.layout(params(screen), scroll: strip.renderScrollY, minHeights: state.minHeights) {
             let to = maxID == item.id ? fullScreenFrame(screen) : item.frame
             if let f = from?[item.id], let t {
                 out[item.id] = f.interpolated(to: to, t)
@@ -2491,7 +2460,7 @@ final class WindowManager {
         if let id = pendingActivation.removeValue(forKey: key), let w = windows[id] ?? floating[id] {
             activate(w)
         }
-        if let strip = strips[key] { pinned.subtract(strip.windowIDs) }
+        if let strip = strips[key] { state.update(strip.windowIDs) { $0.pinned = false } }
     }
 
     /// One display frame: advance animations, then lay out every strip that changed,
@@ -2517,7 +2486,7 @@ final class WindowManager {
             }
         }
         // The last frame of an animation lays out every window, including ones pinned for it.
-        for key in finished { if let strip = strips[key] { pinned.subtract(strip.windowIDs) } }
+        for key in finished { if let strip = strips[key] { state.update(strip.windowIDs) { $0.pinned = false } } }
         if gesture == nil { for key in finished { releaseProxies(key) } }
         for key in dirty {
             // Only the desktop on screen: a strip left behind by a desktop switch mid-animation
@@ -2549,11 +2518,11 @@ final class WindowManager {
             let resizing = liveResize?.id
             // Progress of the strip's slide, same easing as the scroll animation.
             let from = transitions[key], t = progress(key), maxID = maximizedID(key)
-            for item in strip.layout(p, scroll: strip.renderScrollY, minHeights: minHeights) {
+            for item in strip.layout(p, scroll: strip.renderScrollY, minHeights: state.minHeights) {
                 // Never fight the user's drag: the window being resized stays where they put it.
                 // Pinned (just opened) windows are already at their final frame.
                 // Nor the one being dragged by the mouse (the strip may scroll under it).
-                guard item.id != resizing, item.id != dragging, !pinned.contains(item.id),
+                guard item.id != resizing, item.id != dragging, !state[item.id].pinned,
                       let w = windows[item.id] else { continue }
                 let full = maxID == item.id ? fullScreenFrame(screen) : nil
                 if let f = from?[item.id], let t {
@@ -2566,7 +2535,7 @@ final class WindowManager {
                     }
                     // Slide the whole frame, then show it like any other: on screen, peeking
                     // over the top edge, or parked once it's out of view.
-                    place(w, Strip.placement(r, p, minHeight: minHeights[item.id]), screen: screen,
+                    place(w, Strip.placement(r, p, minHeight: state[item.id].minHeight), screen: screen,
                           rowHeight: r.height, hardTop: p.hardTop, clipBottom: p.clipBottom)
                 } else if let full {
                     place(w, .frame(full), screen: screen, rowHeight: full.height, hardTop: p.hardTop, clipBottom: p.clipBottom)
@@ -2610,7 +2579,7 @@ final class WindowManager {
                               trueColor: snapshots.isOnScreenCapture(w.id), moving: isMoving, below: dragging)
                 // Park it (at its full row size, so the live mirror isn't squashed) only once
                 // the stand-in is on screen: a fresh overlay needs a frame or two to appear.
-                if w.parked || pendingParks[w.id] != nil {
+                if w.parked || state[w.id].pendingPark != nil {
                     // already away / about to go
                 } else if wasShowing {
                     overlays.setRealBelow(w.id, true)
@@ -2621,10 +2590,10 @@ final class WindowManager {
                     let size = full.size
                     let item = DispatchWorkItem { [weak self, weak w] in
                         guard let self, let w else { return }
-                        self.pendingParks[w.id] = nil
+                        self.state[w.id].pendingPark = nil
                         if self.overlays.isShowing(w.id) { self.park(w, screen: screen, size: size) }
                     }
-                    pendingParks[w.id] = item
+                    state[w.id].pendingPark = item
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: item)
                 }
                 return
@@ -2635,13 +2604,13 @@ final class WindowManager {
             // shrink, or hide if the app can't get that small.
             if !w.parked && !w.shrunk { Log.debug("no usable snapshot for \(w.id) \(w.appName), shrinking") }
             let top = max(full.minY, hardTop), visible = min(full.maxY, clipBottom) - top
-            let needed = max(settings.minVisible, minHeights[w.id] ?? 0)
+            let needed = max(settings.minVisible, state[w.id].minHeight ?? 0)
             let fallback: Placement = visible >= needed
                 ? .frame(CGRect(x: full.minX, y: top, width: full.width, height: visible))
                 : .park
             return place(w, fallback, screen: screen, rowHeight: rowHeight, hardTop: hardTop, clipBottom: clipBottom)
         }
-        pendingParks.removeValue(forKey: w.id)?.cancel()
+        state[w.id].take(\.pendingPark)?.cancel()
         if overlays.isShowing(w.id) {
             if case .frame(let r) = placement {
                 // Bring the real window back, and keep the stand-in over it until it's there.
@@ -2654,18 +2623,13 @@ final class WindowManager {
         placeReal(w, placement, screen: screen, rowHeight: rowHeight)
     }
 
-    /// Windows being resized off screen for a new snapshot (see `refreshSnapshot`), and when
-    /// each was last re-captured: an app that won't take the new size isn't asked every frame.
-    private var resnapping = Set<CGWindowID>()
-    private var lastResnap: [CGWindowID: CFTimeInterval] = [:]
-
     /// Re-captures a peeking window at its new size: a capture shows the window as it is,
     /// so a parked one is first resized (still off screen) and captured once that landed.
     private func refreshSnapshot(_ w: ManagedWindow, size: CGSize, screen: NSScreen) {
         let id = w.id
         let now = CACurrentMediaTime()
-        guard now - (lastResnap[id] ?? 0) > 2, resnapping.insert(id).inserted else { return }
-        lastResnap[id] = now
+        guard now - (state[id].lastResnap ?? 0) > 2, state[id].mark(\.resnapping) else { return }
+        state[id].lastResnap = now
         if w.parked, let lf = w.lastFrame, abs(lf.width - size.width) > 0.5 || abs(lf.height - size.height) > 0.5 {
             w.parked = false
             park(w, screen: screen, size: size)
@@ -2674,7 +2638,7 @@ final class WindowManager {
         writer.perform(pid: w.pid) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
                 guard let self else { return }
-                self.resnapping.remove(id)
+                self.state[id].resnapping = false
                 guard self.windows[id] != nil else { return }
                 self.snapshots.capture(id, size: size, onScreen: false)
             }
@@ -2720,21 +2684,21 @@ final class WindowManager {
     private func proxyPlace(_ w: ManagedWindow, _ placement: Placement, screen: NSScreen, hardTop: CGFloat) -> Bool {
         guard isMoving else {
             // Laid out at rest (e.g. an animation was cut short): the normal path takes over.
-            proxied.remove(w.id)
+            state[w.id].proxied = false
             return false
         }
         switch placement {
         case .frame(let r):
-            if !proxied.contains(w.id) {
+            if !state[w.id].proxied {
                 guard isSlow(w), !w.shrunk,
                       let image = snapshots.image(w.id, size: r.size) ?? overlays.currentImage(w.id) else { return false }
                 overlays.show(w.id, image: image, full: r, clipTop: hardTop,
                               trueColor: snapshots.isOnScreenCapture(w.id), stream: false, moving: true, below: dragging)
-                proxied.insert(w.id)
-                proxyShownAt[w.id] = CACurrentMediaTime()
+                state[w.id].proxied = true
+                state[w.id].proxyShownAt = CACurrentMediaTime()
                 // The real window moves along under it until it is parked, with its shadow.
                 overlays.setRealBelow(w.id, true)
-                pendingParks.removeValue(forKey: w.id)?.cancel()
+                state[w.id].take(\.pendingPark)?.cancel()
                 placeReal(w, .frame(r), screen: screen, rowHeight: r.height)
                 Log.debug("proxy on \(w.id) \(w.appName)")
                 return true
@@ -2743,7 +2707,7 @@ final class WindowManager {
             guard let image = snapshots.image(w.id, size: r.size) ?? overlays.currentImage(w.id) else { return false }
             overlays.show(w.id, image: image, full: r, clipTop: hardTop, stream: false, moving: true, below: dragging)
             if !w.parked {
-                if CACurrentMediaTime() - (proxyShownAt[w.id] ?? 0) >= Self.standInSettle {
+                if CACurrentMediaTime() - (state[w.id].proxyShownAt ?? 0) >= Self.standInSettle {
                     park(w, screen: screen, size: r.size)
                 } else {
                     placeReal(w, .frame(r), screen: screen, rowHeight: r.height)
@@ -2752,10 +2716,10 @@ final class WindowManager {
             return true
         case .overflow:
             // Becomes a regular top-edge peek (also a stand-in over a parked window).
-            proxied.remove(w.id)
+            state[w.id].proxied = false
             return false
         case .park:
-            if proxied.remove(w.id) != nil { overlays.hide(w.id) }
+            if state[w.id].clear(\.proxied) { overlays.hide(w.id) }
             return false
         }
     }
@@ -2764,12 +2728,11 @@ final class WindowManager {
     /// stand-in on top until the app has actually moved it.
     private func releaseProxies(_ key: StripKey) {
         guard let strip = strips[key], let screen = visibleScreen(key) else { return }
-        let ids = strip.windowIDs.filter { proxied.contains($0) }
+        let ids = strip.windowIDs.filter { state[$0].proxied }
         guard !ids.isEmpty else { return }
-        proxied.subtract(ids)
-        for id in ids { proxyShownAt.removeValue(forKey: id) }
+        state.update(ids) { $0.proxied = false; $0.proxyShownAt = nil }
         let p = params(screen)
-        for item in strip.layout(p, scroll: strip.renderScrollY, minHeights: minHeights) where ids.contains(item.id) {
+        for item in strip.layout(p, scroll: strip.renderScrollY, minHeights: state.minHeights) where ids.contains(item.id) {
             guard let w = windows[item.id] else { continue }
             guard case .frame(let r) = item.placement else {
                 place(w, item.placement, screen: screen, rowHeight: item.rowHeight, hardTop: p.hardTop, clipBottom: p.clipBottom)
@@ -2786,21 +2749,21 @@ final class WindowManager {
     /// and the window vanished for a moment. Gives up waiting after 0.6 s.
     private func handOver(_ w: ManagedWindow, to r: CGRect) {
         overlays.handoff(w.id, to: r, delay: 0.6)
-        guard handingOver.insert(w.id).inserted else { return }
+        guard state[w.id].mark(\.handingOver) else { return }
         let id = w.id
         whenMoved(id, to: r.origin) { [weak self] in
             // Back under the stand-in, with its own shadow (worked out a frame after it shows).
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.017) {
-                guard let self, !self.proxied.contains(id), self.windows[id]?.parked == false else { return }
+                guard let self, !self.state[id].proxied, self.windows[id]?.parked == false else { return }
                 self.overlays.setRealBelow(id, true)
             }
         }
         writer.perform(pid: w.pid) { [weak self] in
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 guard let self else { return }
-                self.handingOver.remove(id)
+                self.state[id].handingOver = false
                 // Not if it became a stand-in or a peek again meanwhile.
-                guard !self.proxied.contains(id), self.windows[id]?.parked == false else { return }
+                guard !self.state[id].proxied, self.windows[id]?.parked == false else { return }
                 self.overlays.fadeOut(id)
             }
         }
@@ -3233,15 +3196,16 @@ final class WindowManager {
         for key in Array(animations.keys) { stopAnimation(key) }
         dirty.removeAll()
         driver.pause()
-        for item in pendingParks.values { item.cancel() }
-        pendingParks.removeAll()
-        proxied.removeAll()
+        state.updateAll { _, s in
+            s.take(\.pendingPark)?.cancel()
+            s.proxied = false
+        }
         overlays.hideAll()
         hideScrollIndicators()
         for (key, screen) in visibleKeys() {
             guard let strip = strips[key] else { continue }
             let vf = Geometry.ax(screen.usableFrame)
-            for item in strip.layout(params(screen), scroll: strip.renderScrollY, minHeights: minHeights) {
+            for item in strip.layout(params(screen), scroll: strip.renderScrollY, minHeights: state.minHeights) {
                 guard let w = windows[item.id] else { continue }
                 // Where it belongs, pushed inside the screen: rows above pile up at the top,
                 // rows below at the bottom; the overview spreads them out.
@@ -3379,7 +3343,7 @@ final class WindowManager {
     /// Another window got focus (Dock, ⌘Tab, a click): a window filling its screen goes back
     /// into the strip.
     private func restoreMaximized(focusing w: ManagedWindow) {
-        for id in appZoomed.keys where id != w.id { unzoom(id) }
+        for (id, _) in state.zoomed where id != w.id { unzoom(id) }
         if let (key, _) = locate(w.id) {
             if let id = maximizedID(key), id != w.id { setMaximized(id, false) }
             return
@@ -3393,7 +3357,7 @@ final class WindowManager {
     /// (a save panel, say) leaves it as it is.
     private func restoreMaximized(focusing el: AXUIElement, pid: pid_t) {
         guard maximized.values.contains(where: { windows[$0].map { $0.pid != pid } ?? false })
-              || appZoomed.keys.contains(where: { floating[$0].map { $0.pid != pid } ?? false }) else { return }
+              || state.zoomed.contains(where: { floating[$0.id].map { $0.pid != pid } ?? false }) else { return }
         writer.perform(pid: pid) { [weak self] in
             guard let frame = AX.frame(el) else { return }
             DispatchQueue.main.async { self?.restoreMaximized(at: frame, except: pid) }
@@ -3402,8 +3366,8 @@ final class WindowManager {
 
     private func restoreMaximized(at frame: CGRect, except pid: pid_t?, keep: CGWindowID? = nil) {
         let center = CGPoint(x: frame.midX, y: frame.midY)
-        for (id, before) in appZoomed where id != keep {
-            guard let w = floating[id] else { appZoomed[id] = nil; continue }
+        for (id, before) in state.zoomed where id != keep {
+            guard let w = floating[id] else { state[id].zoomedFrom = nil; continue }
             guard w.pid != pid, Geometry.ax(Geometry.screen(containingAX: CGPoint(x: before.midX, y: before.midY))?.frame ?? .zero)
                 .contains(center) else { continue }
             unzoom(id)
@@ -3454,7 +3418,7 @@ final class WindowManager {
                     if self.isMaximized(id) {
                         Log.info("\(w.appName) won't fill the screen (\(Int(actual.width))x\(Int(actual.height))); back")
                         self.setMaximized(id, false)
-                    } else if self.forcedZoom.contains(id) {
+                    } else if self.state[id].forcedZoom {
                         Log.info("\(w.appName) won't fill the screen (\(Int(actual.width))x\(Int(actual.height))); back")
                         self.unzoom(id)
                     }
@@ -3488,18 +3452,18 @@ final class WindowManager {
                 let native = AX.bool(element, "AXFullScreen") == true
                 DispatchQueue.main.async {
                     guard let actual, !native, self.floating[id] === w,
-                          CACurrentMediaTime() - (self.dockPlacedAt[id] ?? 0) > 0.6 else { return }
+                          CACurrentMediaTime() - (self.state[id].dockPlacedAt ?? 0) > 0.6 else { return }
                     let fills = self.fillsScreen(actual)
-                    if self.appZoomed[id] == nil {
+                    if self.state[id].zoomedFrom == nil {
                         if fills, let before = w.lastFrame, !self.fillsScreen(before) {
-                            self.appZoomed[id] = before
+                            self.state[id].zoomedFrom = before
                             w.zoomedFrame = actual
                             Log.info("\(w.appName) filled the screen; zoomed floating \(id)")
                         } else if !fills && !self.isDocked(id) {
                             w.lastFrame = actual
                         }
-                    } else if !fills && !self.forcedZoom.contains(id) {
-                        self.appZoomed[id] = nil
+                    } else if !fills && !self.state[id].forcedZoom {
+                        self.state[id].zoomedFrom = nil
                         w.zoomedFrame = nil
                         if !self.isDocked(id) { w.lastFrame = actual }
                         Log.info("\(w.appName) stopped filling the screen; floating \(id) unzoomed")
@@ -3519,26 +3483,26 @@ final class WindowManager {
                 let actual = AX.frame(element), own = Self.drawsOwnTitleBar(element)
                 DispatchQueue.main.async {
                     guard let actual, self.floating[id] != nil else { return }
-                    if self.forcedZoom.contains(id) {
+                    if self.state[id].forcedZoom {
                         self.unzoom(id)
-                    } else if self.appZoomed[id] != nil {
+                    } else if self.state[id].zoomedFrom != nil {
                         // A double click near the top that didn't unzoom it (Blender's own
                         // header is there) keeps it zoomed.
                         let zoomed = self.floating[id]?.zoomedFrame ?? actual
                         if actual.width * actual.height < zoomed.width * zoomed.height - 400 * 20 {
-                            self.appZoomed[id] = nil
+                            self.state[id].zoomedFrom = nil
                             Log.info("app unzoomed floating \(id)")
                         }
                     } else if actual.width * actual.height > before.width * before.height + 400 * 20 {
-                        self.appZoomed[id] = before
+                        self.state[id].zoomedFrom = before
                         self.floating[id]?.zoomedFrame = actual
                         Log.info("app zoomed floating \(id)")
                     } else if own, let screen = Geometry.screen(containingAX: CGPoint(x: actual.midX, y: actual.midY)) {
                         let target = self.fullScreenFrame(screen)
-                        self.appZoomed[id] = actual
+                        self.state[id].zoomedFrom = actual
                         self.floating[id]?.zoomedFrame = target
-                        self.forcedZoom.insert(id)
-                        self.animateFloating(w, from: actual, to: target) { [weak self] in self?.forcedZoom.contains(id) == true }
+                        self.state[id].forcedZoom = true
+                        self.animateFloating(w, from: actual, to: target) { [weak self] in self?.state[id].forcedZoom == true }
                         Log.info("zoomed floating \(id) \(w.appName) for its app")
                         self.verifyForcedZoom(id)
                     }
@@ -3550,10 +3514,10 @@ final class WindowManager {
     /// Puts an app-zoomed floating window back where it was, shrinking it there over
     /// `animationDuration` (a slow app just shows fewer of the steps).
     private func unzoom(_ id: CGWindowID) {
-        forcedZoom.remove(id)
-        guard let before = appZoomed.removeValue(forKey: id), let w = floating[id] else { return }
+        state[id].forcedZoom = false
+        guard let before = state[id].take(\.zoomedFrom), let w = floating[id] else { return }
         Log.info("unzoom floating \(id) \(w.appName)")
-        animateFloating(w, from: w.zoomedFrame ?? w.lastFrame, to: before) { [weak self] in self?.appZoomed[id] == nil }
+        animateFloating(w, from: w.zoomedFrame ?? w.lastFrame, to: before) { [weak self] in self?.state[id].zoomedFrom == nil }
     }
 
     /// How long a floating window takes to grow or shrink (a slow app just shows fewer steps).
@@ -3566,7 +3530,7 @@ final class WindowManager {
     private func animateFloating(_ w: ManagedWindow, from: CGRect?, to: CGRect, still: @escaping () -> Bool) {
         let id = w.id, duration = floatingAnimationDuration
         guard duration > 0, let from, !from.approxEqual(to) else {
-            dockPlacedAt[id] = CACurrentMediaTime()
+            state[id].dockPlacedAt = CACurrentMediaTime()
             writer.move(id, pid: w.pid, element: w.element, to: to, setSize: true)
             w.lastFrame = to
             return
@@ -3579,7 +3543,7 @@ final class WindowManager {
             let f = CGRect(x: from.minX + (to.minX - from.minX) * e, y: from.minY + (to.minY - from.minY) * e,
                            width: from.width + (to.width - from.width) * e,
                            height: from.height + (to.height - from.height) * e).integral
-            self.dockPlacedAt[id] = CACurrentMediaTime()
+            self.state[id].dockPlacedAt = CACurrentMediaTime()
             self.writer.move(id, pid: w.pid, element: w.element, to: t < 1 ? f : to, setSize: true)
             w.lastFrame = t < 1 ? f : to
             if t >= 1 { timer.invalidate() }
@@ -3658,11 +3622,11 @@ final class WindowManager {
             windows.removeValue(forKey: fid)
             c.strip.remove(fid)
             floating[fid] = w
-            manualFloat.insert(fid)
+            state[fid].manualFloat = true
             let vp = viewport(c.screen)
             let size = CGSize(width: min(vp.width * 0.6, 1200), height: min(vp.height * 0.7, 900))
             let origin = CGPoint(x: vp.midX - size.width / 2, y: vp.midY - size.height / 2)
-            pendingParks.removeValue(forKey: fid)?.cancel()
+            state[fid].take(\.pendingPark)?.cancel()
             overlays.hide(fid)
             writer.move(fid, pid: w.pid, element: w.element, to: CGRect(origin: origin, size: size), setSize: true)
             let element = w.element
@@ -3670,7 +3634,7 @@ final class WindowManager {
             c.strip.scrollY = c.strip.clampScroll(c.strip.scrollY, viewportHeight: c.vh, gap: settings.gap)
             relayout(c.key, animated: true)
         } else if let w = floating.removeValue(forKey: fid) {
-            manualFloat.remove(fid)
+            state[fid].manualFloat = false
             undock(fid)
             beginTransition(c.key)
             windows[fid] = w
