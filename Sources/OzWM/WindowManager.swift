@@ -964,6 +964,20 @@ final class WindowManager {
     /// Steam's main window belongs to "Steam Helper", a helper without a Dock icon.
     static let steamHelper = "com.valvesoftware.steam.helper"
 
+    /// Browsers: each of their windows is one to tile, web apps and popups too, though a
+    /// window can be missing its full screen button (a web app, a window just opened).
+    static let browsers: Set<String> = [
+        "com.google.Chrome", "com.google.Chrome.beta", "com.google.Chrome.dev", "com.google.Chrome.canary",
+        "org.chromium.Chromium", "com.brave.Browser", "com.microsoft.edgemac", "com.vivaldi.Vivaldi",
+        "com.operasoftware.Opera", "company.thebrowser.Browser", "com.apple.Safari", "org.mozilla.firefox",
+    ]
+
+    /// A window above the others (picture in picture): not one of the strip's.
+    private static func isRaised(_ id: CGWindowID) -> Bool {
+        let info = (CGWindowListCreateDescriptionFromArray([NSNumber(value: id)] as CFArray) as? [[String: Any]])?.first
+        return (info?[kCGWindowLayer as String] as? Int ?? 0) != 0
+    }
+
     /// An app whose windows Oz tiles: a regular one (in the Dock), or Steam's helper.
     static func hasWindows(_ app: NSRunningApplication) -> Bool {
         app.activationPolicy == .regular || app.bundleIdentifier == steamHelper
@@ -1093,6 +1107,7 @@ final class WindowManager {
         // Steam draws its own title bar (no buttons): its main window is the one titled
         // "Steam"; its menus and notifications are other Steam Helper windows.
         let secondary = w.bundleID == Self.steamHelper ? probe.title != "Steam"
+            : Self.browsers.contains(w.bundleID ?? "") ? Self.isRaised(wid)
             : !probe.main || (w.bundleID == "org.blenderfoundation.blender" && !probe.title.contains("Blender"))
         if let m = minimizedFloating.removeValue(forKey: wid) {
             floating[wid] = w
