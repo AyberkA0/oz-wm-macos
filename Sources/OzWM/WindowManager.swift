@@ -464,10 +464,7 @@ final class WindowManager {
         beginTransition(key, recordUndo: false)
         for saved in target.rows.flatMap(\.windows) where windows[saved.id] == nil {
             guard let w = floating[saved.id], state[saved.id].manualFloat else { continue }
-            undock(saved.id)
-            floating.removeValue(forKey: saved.id)
-            state[saved.id].manualFloat = false
-            windows[saved.id] = w
+            makeTiled(w)
             s.insertRow(saved.id, height: vh / 2, before: nil)
             if settings.animationDuration > 0, let f = w.lastFrame { pendingFrom[key, default: [:]][saved.id] = f }
         }
@@ -615,10 +612,8 @@ final class WindowManager {
         }
         beginTransition(key)
         for id in docked.values.joined() {
-            guard let w = windows.removeValue(forKey: id) else { continue }
-            strip.remove(id)
-            floating[id] = w
-            state[id].manualFloat = true
+            guard let w = windows[id] else { continue }
+            makeFloating(w, from: strip)
         }
         if !docked.isEmpty { docks[key] = docked }
         let vh = viewportHeight(key)
@@ -681,10 +676,8 @@ final class WindowManager {
             // None of its windows here yet (another desktop, read later): try again next scan.
             guard !matched.isEmpty || !docked.isEmpty else { continue }
             for id in docked.values.joined() {
-                guard let w = windows.removeValue(forKey: id) else { continue }
-                strip.remove(id)
-                floating[id] = w
-                state[id].manualFloat = true
+                guard let w = windows[id] else { continue }
+                makeFloating(w, from: strip)
             }
             if !docked.isEmpty { docks[key] = docked }
             strip.scrollY = strip.clampScroll(strip.scrollY, viewportHeight: vh, gap: settings.gap)
@@ -866,12 +859,8 @@ final class WindowManager {
         var offset: CGFloat = 0
         let hidden = restoreFrames(strip, key: key, offset: &offset)
         for id in strip.windowIDs {
-            state[id].pinned = false
-            state[id].proxied = false
-            state[id].take(\.pendingPark)?.cancel()
-            overlays.remove(id)
+            forgetStripState(id)
             snapshots.remove(id)
-            state[id].minHeight = nil
             windows.removeValue(forKey: id)?.frameCheck?.cancel()
         }
         // Queued after any pending move of the same window, so it wins.
@@ -1168,18 +1157,13 @@ final class WindowManager {
     }
 
     private func unmanage(_ id: CGWindowID, focusNeighbor: Bool) {
-        state[id].pinned = false
-        state[id].proxied = false
-        state[id].proxyShownAt = nil
-        state[id].take(\.pendingPark)?.cancel()
-        overlays.remove(id)
+        forgetStripState(id)
         snapshots.remove(id)
         forgetFloating(id)
         state[id].userDraggedAt = nil
         state[id].lastResnap = nil
         state[id].userResizedAt = nil
         state[id].sizeEnforcedAt = nil
-        state[id].minHeight = nil
         guard let w = windows.removeValue(forKey: id) else { return }
         w.frameCheck?.cancel()
         guard let (key, strip) = locate(id) else { return }
@@ -1668,6 +1652,41 @@ final class WindowManager {
         state[id].minimized = .init(manual: state[id].manualFloat, dock: dock)
     }
 
+    /// A tiled window leaves `strip` and floats, taken out by the user (they may drop it
+    /// back in): what the strip noted about showing it goes.
+    private func makeFloating(_ w: ManagedWindow, from strip: Strip) {
+        strip.remove(w.id)
+        windows.removeValue(forKey: w.id)
+        floating[w.id] = w
+        state[w.id].manualFloat = true
+        forgetStripState(w.id)
+        w.parked = false
+        w.shrunk = false
+    }
+
+    /// A floating window becomes tiled (the caller puts it in a strip): out of its region,
+    /// and what was noted about it floating goes.
+    private func makeTiled(_ w: ManagedWindow) {
+        undock(w.id)
+        floating.removeValue(forKey: w.id)
+        windows[w.id] = w
+        state[w.id].manualFloat = false
+        state[w.id].pendingDrop = false
+        state[w.id].forcedZoom = false
+        state[w.id].zoomedFrom = nil
+    }
+
+    /// Forgets how the strip was showing a window: its stand-in, whether it is pinned or about
+    /// to be parked, and the height its app wouldn't go below.
+    private func forgetStripState(_ id: CGWindowID) {
+        state[id].pinned = false
+        state[id].proxied = false
+        state[id].proxyShownAt = nil
+        state[id].take(\.pendingPark)?.cancel()
+        state[id].minHeight = nil
+        overlays.remove(id)
+    }
+
     private func forgetFloating(_ id: CGWindowID) {
         undock(id)
         state[id].dockPlacedAt = nil
@@ -1702,18 +1721,8 @@ final class WindowManager {
     private func floatOut(_ w: ManagedWindow, at frame: CGRect) {
         guard let (key, strip) = locate(w.id) else { return }
         beginTransition(key)
-        strip.remove(w.id)
-        windows.removeValue(forKey: w.id)
-        floating[w.id] = w
-        state[w.id].manualFloat = true
-        state[w.id].pinned = false
-        state[w.id].proxied = false
-        state[w.id].take(\.pendingPark)?.cancel()
-        overlays.remove(w.id)
-        state[w.id].minHeight = nil
+        makeFloating(w, from: strip)
         w.lastFrame = frame
-        w.parked = false
-        w.shrunk = false
         Log.debug("dragged out of the scroll area: \(w.id) \(w.appName)")
         if strip.isEmpty {
             strips.removeValue(forKey: key)
@@ -1755,10 +1764,7 @@ final class WindowManager {
             if !dock(w, at: point) { undock(id) }
             return
         }
-        undock(id)
-        floating.removeValue(forKey: id)
-        state[id].manualFloat = false
-        windows[id] = w
+        makeTiled(w)
         let slot = zoneSlot(at: point, dragging: id)?.slot ?? .row(before: nil)
         Log.debug("dropped into the scroll area: \(id) \(w.appName) \(slot)")
         insert(w, into: key, slot: slot, from: frame, height: min(max(frame.height, 120), viewport(screen).height).rounded())
@@ -3619,25 +3625,18 @@ final class WindowManager {
         if let w = windows[fid] {
             // Tiled -> floating: take it out and center it.
             beginTransition(c.key)
-            windows.removeValue(forKey: fid)
-            c.strip.remove(fid)
-            floating[fid] = w
-            state[fid].manualFloat = true
+            makeFloating(w, from: c.strip)
             let vp = viewport(c.screen)
             let size = CGSize(width: min(vp.width * 0.6, 1200), height: min(vp.height * 0.7, 900))
             let origin = CGPoint(x: vp.midX - size.width / 2, y: vp.midY - size.height / 2)
-            state[fid].take(\.pendingPark)?.cancel()
-            overlays.hide(fid)
             writer.move(fid, pid: w.pid, element: w.element, to: CGRect(origin: origin, size: size), setSize: true)
             let element = w.element
             writer.perform(pid: w.pid) { AX.raise(element) }
             c.strip.scrollY = c.strip.clampScroll(c.strip.scrollY, viewportHeight: c.vh, gap: settings.gap)
             relayout(c.key, animated: true)
-        } else if let w = floating.removeValue(forKey: fid) {
-            state[fid].manualFloat = false
-            undock(fid)
+        } else if let w = floating[fid] {
+            makeTiled(w)
             beginTransition(c.key)
-            windows[fid] = w
             w.lastFrame = nil
             let h = Strip.height(forRatio: settings.defaultHeight, viewportHeight: c.vh, gap: settings.gap)
             c.strip.insert(fid, height: h, anchor: c.strip.focused, position: settings.newWindowPosition)
