@@ -2246,13 +2246,11 @@ final class WindowManager {
         case .swipeBegan:
             guard settings.swipe.enabled, let screen = Geometry.screenUnderMouse() else { return }
             let key = visibleKey(for: screen)
-            // A window fills the screen: there is nothing to scroll into view.
+            // A window fills the screen: the swipe puts it back to its size (and scrolls
+            // nothing, while it shrinks; the next one does).
+            if restoreFilling(screen, key: key) { return }
             guard let strip = strips[key], !strip.isEmpty else {
                 Log.info("swipe ignored: no tiled windows on this desktop")
-                return
-            }
-            guard maximizedID(key) == nil else {
-                Log.info("swipe ignored: a window is maximized")
                 return
             }
             guard !appFilledScreen(screen) else { return }
@@ -3340,6 +3338,23 @@ final class WindowManager {
     /// beside the Dock), not just the Oz zone, with the usual margin.
     private func fullScreenFrame(_ screen: NSScreen) -> CGRect {
         Geometry.ax(screen.usableFrame).insetBy(dx: settings.outerGap, dy: settings.outerGap)
+    }
+
+    /// Puts the windows filling `screen` (the strip's maximized one, floating ones zoomed by
+    /// their app or by Oz) back to their size. Whether there were any.
+    private func restoreFilling(_ screen: NSScreen, key: StripKey) -> Bool {
+        var any = false
+        for (id, before) in state.zoomed where floating[id] != nil
+            && Geometry.screen(containingAX: CGPoint(x: before.midX, y: before.midY)) == screen {
+            unzoom(id)
+            any = true
+        }
+        if let id = maximizedID(key) {
+            setMaximized(id, false)
+            any = true
+        }
+        if any { Log.info("swipe restores the window filling the screen") }
+        return any
     }
 
     /// The frontmost window on `screen` was made to fill it by its app (title bar double

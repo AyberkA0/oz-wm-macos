@@ -111,7 +111,7 @@ When Oz opens Mission Control or App Exposé (double tap, `⌃⌥ m`, `⌃⌥⇧
 
 ### Full screen, undo and saved layouts
 
-- **Double-click a title bar** (macOS zoom): the window fills the entire usable screen while the rest of the strip stays in place behind it. Double-click again to return it to its position. The same is available as `toggleMaximize` (`⌃⌥⇧ f`). Rearranging the strip restores the window first.
+- **Double-click a title bar** (macOS zoom): the window fills the entire usable screen while the rest of the strip stays in place behind it. Double-click again, or swipe with three fingers, to return it to its position. The same is available as `toggleMaximize` (`⌃⌥⇧ f`). Rearranging the strip restores the window first.
 - **Undo** (`⌃⌥ z`) reverts the strip to its state before the last change: keyboard moves and resizes, drag and drop, mouse resizes, or a window dragged out of the scroll area (which returns to the strip). Up to 20 steps per strip.
 - **Saved layouts.** Each desktop's arrangement (rows, heights, widths, positions within rows, scroll position, focus, and windows placed around the scroll area) is saved to `~/Library/Application Support/Oz/layout.json` whenever it changes and when Oz quits, and restored on the next launch. Windows are matched by their window ID (stable while the app keeps running) or, if the app was restarted, by application and title. Unrecognised windows are appended after the restored ones.
 
