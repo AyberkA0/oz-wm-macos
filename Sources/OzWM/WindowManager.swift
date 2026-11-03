@@ -139,6 +139,8 @@ final class WindowManager {
         var free: CGFloat
     }
     private var gesture: GestureState?
+    /// A swipe that put the windows filling a screen back to their size (see `RefillSwipe`).
+    private var refillSwipe: RefillSwipe?
 
     /// The window the user is resizing with the mouse right now; its neighbours reflow live.
     private var liveResize: (id: CGWindowID, key: StripKey)?
@@ -2248,7 +2250,10 @@ final class WindowManager {
             let key = visibleKey(for: screen)
             // A window fills the screen: the swipe puts it back to its size (and scrolls
             // nothing, while it shrinks; the next one does).
-            if restoreFilling(screen, key: key) { return }
+            if let r = restoreFilling(screen, key: key) {
+                refillSwipe = r
+                return
+            }
             guard let strip = strips[key], !strip.isEmpty else {
                 Log.info("swipe ignored: no tiled windows on this desktop")
                 return
@@ -2271,6 +2276,7 @@ final class WindowManager {
             Log.debug("swipe began")
 
         case .swipeChanged(let dy):
+            if refillSwipe != nil { return refillSwipeMoved(dy) }
             guard let g = gesture else { return }
             gesture?.padTravel += dy
             let vh = viewport(g.screen).height
@@ -2294,6 +2300,7 @@ final class WindowManager {
             markDirty(g.key)
 
         case .swipeEnded(let v):
+            refillSwipe = nil
             guard let g = gesture else { return }
             gesture = nil
             FrameStats.report("swipe")
@@ -3340,21 +3347,73 @@ final class WindowManager {
         Geometry.ax(screen.usableFrame).insetBy(dx: settings.outerGap, dy: settings.outerGap)
     }
 
+    /// A swipe put the windows filling a screen back to their size. Moving back the other way
+    /// before the fingers lift makes them fill it again, and the first way once more puts them
+    /// back again: each turn of the fingers, once they have come back `turn` of the trackpad's
+    /// height from the furthest they went.
+    private struct RefillSwipe {
+        var tiled: CGWindowID?
+        var floating: [(id: CGWindowID, zoom: WindowState.Zoom)]
+        var filled = false
+        /// Pad travel (fractions of the trackpad's height) since the swipe began, the way the
+        /// fingers last went (0 until they have gone one), and the furthest they got that way.
+        var travel = 0.0
+        var direction = 0.0
+        var furthest = 0.0
+        static let turn = 0.06
+    }
+
     /// Puts the windows filling `screen` (the strip's maximized one, floating ones zoomed by
-    /// their app or by Oz) back to their size. Whether there were any.
-    private func restoreFilling(_ screen: NSScreen, key: StripKey) -> Bool {
-        var any = false
+    /// their app or by Oz) back to their size, remembering them to fill it again (see
+    /// `RefillSwipe`). nil if there were none.
+    private func restoreFilling(_ screen: NSScreen, key: StripKey) -> RefillSwipe? {
+        var r = RefillSwipe(tiled: maximizedID(key), floating: [])
         for (id, before) in state.zoomed where floating[id] != nil
             && Geometry.screen(containingAX: CGPoint(x: before.midX, y: before.midY)) == screen {
-            unzoom(id)
-            any = true
+            if let zoom = state[id].zoom { r.floating.append((id, zoom)) }
         }
-        if let id = maximizedID(key) {
-            setMaximized(id, false)
-            any = true
+        guard r.tiled != nil || !r.floating.isEmpty else { return nil }
+        Log.info("swipe restores the window filling the screen")
+        setFilling(r, false, first: true)
+        return r
+    }
+
+    private func refillSwipeMoved(_ dy: Double) {
+        guard var r = refillSwipe else { return }
+        r.travel += dy
+        if r.direction == 0 {
+            if abs(r.travel) > 0.01 { r.direction = r.travel > 0 ? 1 : -1 }
+            r.furthest = r.travel
+        } else if (r.travel - r.furthest) * r.direction > 0 {
+            r.furthest = r.travel
+        } else if (r.furthest - r.travel) * r.direction > RefillSwipe.turn {
+            r.filled.toggle()
+            r.direction = -r.direction
+            r.furthest = r.travel
+            Log.info("swipe turned back: the window \(r.filled ? "fills the screen again" : "goes back to its size")")
+            setFilling(r, r.filled)
         }
-        if any { Log.info("swipe restores the window filling the screen") }
-        return any
+        refillSwipe = r
+    }
+
+    /// The windows of `r` fill the screen, or go back to their size, growing or shrinking
+    /// from wherever they are now (`first`: from the size they were made to fill the screen
+    /// with, as Oz didn't move them there).
+    private func setFilling(_ r: RefillSwipe, _ on: Bool, first: Bool = false) {
+        for f in r.floating {
+            guard let w = floating[f.id] else { continue }
+            if on {
+                guard state[f.id].zoom == nil, let to = w.zoomedFrame else { continue }
+                state[f.id].zoom = f.zoom
+                animateFloating(w, from: w.lastFrame, to: to) { [weak self] in self?.state[f.id].zoom != nil }
+            } else if state[f.id].zoom != nil {
+                let from = first ? w.zoomedFrame ?? w.lastFrame : w.lastFrame
+                state[f.id].zoom = nil
+                Log.info("unzoom floating \(f.id) \(w.appName)")
+                animateFloating(w, from: from, to: f.zoom.before) { [weak self] in self?.state[f.id].zoom == nil }
+            }
+        }
+        if let id = r.tiled { setMaximized(id, on) }
     }
 
     /// The frontmost window on `screen` was made to fill it by its app (title bar double
