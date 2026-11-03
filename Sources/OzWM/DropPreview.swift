@@ -2,7 +2,7 @@ import Cocoa
 
 /// A panel whose glass always looks the way it does in the active app. Oz runs in the
 /// background, and macOS draws the glass of inactive apps as a dense frosted material; real
-/// Liquid Glass (clear, refracting what's behind it at the edges) only shows for the active
+/// Liquid Glass (light, refracting what's behind it at the edges) only shows for the active
 /// app. Activating Oz or making the panel key would take focus from the app whose window is
 /// being dragged, so the window instead answers AppKit's "should this look active?" with
 /// yes. (Private AppKit methods: if they stop being asked, the glass is just frosted again.)
@@ -12,41 +12,52 @@ private final class ActiveLookPanel: NSPanel {
     @objc func _hasKeyAppearance() -> Bool { true }
 }
 
-/// The light on a pane of glass: a bright rim (strongest at the top left, where the light
-/// comes from), a soft sheen across the top and a faint shade along the bottom, as the
-/// thickness of the glass would give it. Drawn on top of the system glass, and on its own
-/// over the frosted material before macOS 26.
+/// The light on a pane of glass, as Liquid Glass catches it: glints where the edge faces the
+/// light (strongest at the top left, fainter at the opposite corner, as light passes through
+/// and catches the far side), fading to almost nothing along the straight edges; a softer band
+/// just inside the edge, the light bent by the glass's thickness; and a faint sheen across the
+/// top. Drawn on top of the system glass, and on its own over the frosted material before macOS 26.
 private final class GlassLight: NSView {
     private let radius: CGFloat
-    private let rim = CAGradientLayer()
-    private let rimShape = CAShapeLayer()
+    private let edge = CAGradientLayer()
+    private let edgeShape = CAShapeLayer()
+    private let band = CAGradientLayer()
+    private let bandShape = CAShapeLayer()
     private let sheen = CAGradientLayer()
-    private let shade = CAGradientLayer()
     private let sheenClip = CAShapeLayer()
-    private let shadeClip = CAShapeLayer()
+
+    /// How bright the light is around the edge, from the top left corner (0) round to it again
+    /// (1): a glint there, a fainter one at the bottom right (0.5), little in between.
+    private static let glints: [(at: NSNumber, alpha: CGFloat)] = [
+        (0, 0.6), (0.1, 0.32), (0.2, 0.1), (0.3, 0.1), (0.4, 0.22), (0.5, 0.38),
+        (0.6, 0.22), (0.7, 0.1), (0.8, 0.1), (0.9, 0.32), (1, 0.6),
+    ]
 
     init(radius: CGFloat) {
         self.radius = radius
         super.init(frame: .zero)
         wantsLayer = true
-        rim.colors = [NSColor(white: 1, alpha: 0.95).cgColor, NSColor(white: 1, alpha: 0.18).cgColor,
-                      NSColor(white: 1, alpha: 0.55).cgColor]
-        rim.locations = [0, 0.55, 1]
-        rim.startPoint = CGPoint(x: 0, y: 1)
-        rim.endPoint = CGPoint(x: 1, y: 0)
-        rimShape.fillColor = nil
-        rimShape.strokeColor = NSColor.black.cgColor
-        rimShape.lineWidth = 1.5
-        rim.mask = rimShape
-        sheen.colors = [NSColor(white: 1, alpha: 0.2).cgColor, NSColor(white: 1, alpha: 0).cgColor]
+        // Measured round the middle from the top left corner: whichever way the angle turns,
+        // the glints land on that corner and the one opposite.
+        for (l, scale) in [(edge, 0.7), (band, 0.12)] as [(CAGradientLayer, CGFloat)] {
+            l.type = .conic
+            l.startPoint = CGPoint(x: 0.5, y: 0.5)
+            l.endPoint = CGPoint(x: 0, y: 1)
+            l.colors = Self.glints.map { NSColor(white: 1, alpha: $0.alpha * scale).cgColor }
+            l.locations = Self.glints.map(\.at)
+        }
+        for m in [edgeShape, bandShape] {
+            m.fillColor = nil
+            m.strokeColor = NSColor.black.cgColor
+        }
+        edgeShape.lineWidth = 1
+        edge.mask = edgeShape
+        band.mask = bandShape
+        sheen.colors = [NSColor(white: 1, alpha: 0.08).cgColor, NSColor(white: 1, alpha: 0).cgColor]
         sheen.startPoint = CGPoint(x: 0.5, y: 1)
-        sheen.endPoint = CGPoint(x: 0.5, y: 0.6)
+        sheen.endPoint = CGPoint(x: 0.5, y: 0.7)
         sheen.mask = sheenClip
-        shade.colors = [NSColor(white: 0, alpha: 0).cgColor, NSColor(white: 0, alpha: 0.1).cgColor]
-        shade.startPoint = CGPoint(x: 0.5, y: 0.3)
-        shade.endPoint = CGPoint(x: 0.5, y: 0)
-        shade.mask = shadeClip
-        for l in [sheen, shade, rim] {
+        for l in [sheen, band, edge] {
             l.actions = ["bounds": NSNull(), "position": NSNull(), "frame": NSNull()]
             layer?.addSublayer(l)
         }
@@ -59,15 +70,85 @@ private final class GlassLight: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         let b = bounds
-        let full = CGPath(roundedRect: b, cornerWidth: radius, cornerHeight: radius, transform: nil)
-        for l in [rim, sheen, shade] as [CALayer] { l.frame = b }
-        for m in [rimShape, sheenClip, shadeClip] { m.frame = b }
-        rimShape.path = CGPath(roundedRect: b.insetBy(dx: 0.75, dy: 0.75), cornerWidth: radius - 0.75,
-                               cornerHeight: radius - 0.75, transform: nil)
-        sheenClip.path = full
-        shadeClip.path = full
+        for l in [edge, band, sheen] as [CALayer] { l.frame = b }
+        for m in [edgeShape, bandShape, sheenClip] { m.frame = b }
+        func inset(_ d: CGFloat) -> CGPath {
+            CGPath(roundedRect: b.insetBy(dx: d, dy: d), cornerWidth: max(radius - d, 0), cornerHeight: max(radius - d, 0), transform: nil)
+        }
+        edgeShape.path = inset(0.5)
+        // The band reaches a few points in (less on a thin rod), from the edge inwards.
+        let w = min(5, radius * 0.6)
+        bandShape.lineWidth = w
+        bandShape.path = inset(w / 2)
+        sheenClip.path = inset(0)
         CATransaction.commit()
     }
+}
+
+/// A pane of glass `radius` round with its light: clear Liquid Glass with a see-through
+/// layer of blur over it, or the frosted material alone before macOS 26. The clear style alone
+/// bends what's behind it like a lens at the edges, and the regular one is thickly frosted:
+/// the blur, more than half there, frosts it a little, and across `edgeBand` points from the
+/// edge rises to nearly whole, hiding most of the bending there. Without a band (a thin rod,
+/// all edge) it is nearly whole throughout.
+private func glassPane(radius: CGFloat, edgeBand: CGFloat? = nil) -> NSView {
+    let light = GlassLight(radius: radius)
+    let blur = NSVisualEffectView()
+    blur.blendingMode = .behindWindow
+    blur.state = .active
+    blur.wantsLayer = true
+    blur.layer?.cornerRadius = radius
+    blur.layer?.masksToBounds = true
+    guard #available(macOS 26.0, *) else {
+        blur.material = .hudWindow
+        light.frame = blur.bounds
+        light.autoresizingMask = [.width, .height]
+        blur.addSubview(light)
+        return blur
+    }
+    blur.material = .popover
+    if let edgeBand {
+        blur.maskImage = blurMask(radius: radius, band: edgeBand, inner: 0.6, edge: 0.95)
+    } else {
+        blur.alphaValue = 0.9
+    }
+    // The light beside the blur, not in it: the blur's see-through-ness would dim it too.
+    let content = NSView()
+    for v in [blur, light] as [NSView] {
+        v.frame = content.bounds
+        v.autoresizingMask = [.width, .height]
+        content.addSubview(v)
+    }
+    let glass = NSGlassEffectView()
+    glass.style = .clear
+    glass.cornerRadius = radius
+    glass.contentView = content
+    return glass
+}
+
+/// How much of the blur shows, as a mask that stretches to any size: `inner` in the middle,
+/// rising to `edge` over the `band` points along the edge.
+private func blurMask(radius: CGFloat, band: CGFloat, inner: CGFloat, edge: CGFloat) -> NSImage {
+    let cap = ceil(max(radius, band)) + 1
+    let side = cap * 2 + 1
+    let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+        // Each inset rounded rect replaces what the larger one left: a ramp inwards.
+        ctx.setBlendMode(.copy)
+        let steps = max(Int(band * 2), 1)
+        for i in 0...steps {
+            let d = band * CGFloat(i) / CGFloat(steps)
+            let t = 1 - CGFloat(i) / CGFloat(steps)
+            let r = max(radius - d, 0)
+            ctx.setFillColor(NSColor(white: 0, alpha: inner + (edge - inner) * t * t).cgColor)
+            ctx.addPath(CGPath(roundedRect: rect.insetBy(dx: d, dy: d), cornerWidth: r, cornerHeight: r, transform: nil))
+            ctx.fillPath()
+        }
+        return true
+    }
+    image.capInsets = NSEdgeInsets(top: cap, left: cap, bottom: cap, right: cap)
+    image.resizingMode = .stretch
+    return image
 }
 
 /// While a window is dragged, shows where it will land when let go: a pane of Liquid Glass
@@ -92,31 +173,7 @@ final class DropPreview {
         window.collectionBehavior = [.ignoresCycle, .fullScreenNone, .transient]
         window.alphaValue = 0
 
-        let radius: CGFloat = 24
-        let light = GlassLight(radius: radius)
-        let content: NSView
-        if #available(macOS 26.0, *) {
-            // Clear glass, untinted: the closest to the system's own Liquid Glass. (The regular
-            // style stays frosted even when it looks active, and a tint clouds it.)
-            let glass = NSGlassEffectView()
-            glass.style = .clear
-            glass.cornerRadius = radius
-            glass.contentView = light
-            content = glass
-        } else {
-            let blur = NSVisualEffectView()
-            blur.material = .hudWindow
-            blur.blendingMode = .behindWindow
-            blur.state = .active
-            blur.wantsLayer = true
-            blur.layer?.cornerRadius = radius
-            blur.layer?.masksToBounds = true
-            light.frame = blur.bounds
-            light.autoresizingMask = [.width, .height]
-            blur.addSubview(light)
-            content = blur
-        }
-        window.contentView = content
+        window.contentView = glassPane(radius: 24, edgeBand: 18)
     }
 
     /// Shows (or moves) the preview over `frame` (AX coordinates), ordered just below the
@@ -180,27 +237,7 @@ final class InsertionLine {
         window.animationBehavior = .none
         window.collectionBehavior = [.ignoresCycle, .fullScreenNone, .transient]
 
-        let radius = InsertionLine.thickness / 2
-        let light = GlassLight(radius: radius)
-        if #available(macOS 26.0, *) {
-            let glass = NSGlassEffectView()
-            glass.style = .clear
-            glass.cornerRadius = radius
-            glass.contentView = light
-            window.contentView = glass
-        } else {
-            let blur = NSVisualEffectView()
-            blur.material = .hudWindow
-            blur.blendingMode = .behindWindow
-            blur.state = .active
-            blur.wantsLayer = true
-            blur.layer?.cornerRadius = radius
-            blur.layer?.masksToBounds = true
-            light.frame = blur.bounds
-            light.autoresizingMask = [.width, .height]
-            blur.addSubview(light)
-            window.contentView = blur
-        }
+        window.contentView = glassPane(radius: InsertionLine.thickness / 2)
     }
 
     /// `frame`: the rod, AX coordinates.
