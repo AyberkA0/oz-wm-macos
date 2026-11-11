@@ -151,9 +151,6 @@ final class WindowManager {
     private var pendingActivation: [StripKey: CGWindowID] = [:]
     /// Last focused window as reported by AX notifications (avoids asking the app).
     private var trackedFocus: CGWindowID?
-    /// The window that is key by now (`trackedFocus` runs ahead of it while a scroll to a
-    /// window ends before it is focused): it wears macOS's key-window shadow.
-    private var keyWindow: CGWindowID?
     /// The lock screen is up: focus changes then are its own, not the user's.
     private var screenLocked = false
     private var unlockedAt: CFTimeInterval = 0
@@ -1011,7 +1008,6 @@ final class WindowManager {
         }
 
         if initial, let fid = systemFocusedWindowID() {
-            keyWindow = fid
             if let (_, strip) = locate(fid) { strip.focused = fid }
         }
         let restored = applyPendingRestores()
@@ -1365,7 +1361,6 @@ final class WindowManager {
         }
         if !refocus { restoreMaximized(focusing: w) }
         trackedFocus = w.id
-        keyWindow = w.id
         guard gesture == nil, windows[w.id] != nil, let (key, strip) = locate(w.id) else { return }
         let wid = w.id
         strip.focused = wid
@@ -2696,11 +2691,9 @@ final class WindowManager {
                 if w.parked || state[w.id].pendingPark != nil {
                     // already away / about to go
                 } else if wasShowing {
-                    overlays.setRealBelow(w.id, true)
                     park(w, screen: screen, size: full.size)
                 } else {
-                    // It stays under the stand-in, with its shadow, until it is parked.
-                    overlays.setRealBelow(w.id, true)
+                    // It stays under the stand-in until it is parked.
                     let size = full.size
                     let item = DispatchWorkItem { [weak self, weak w] in
                         guard let self, let w else { return }
@@ -2810,8 +2803,7 @@ final class WindowManager {
                               trueColor: snapshots.isOnScreenCapture(w.id), stream: false, moving: true, below: dragging)
                 state[w.id].proxied = true
                 state[w.id].proxyShownAt = CACurrentMediaTime()
-                // The real window moves along under it until it is parked, with its shadow.
-                overlays.setRealBelow(w.id, true)
+                // The real window moves along under it until it is parked.
                 state[w.id].take(\.pendingPark)?.cancel()
                 placeReal(w, .frame(r), screen: screen, rowHeight: r.height)
                 Log.debug("proxy on \(w.id) \(w.appName)")
@@ -2865,13 +2857,6 @@ final class WindowManager {
         overlays.handoff(w.id, to: r, delay: Timing.handOverGiveUp)
         guard state[w.id].mark(\.handingOver) else { return }
         let id = w.id
-        // Back under the stand-in, with its own shadow (worked out a frame after it shows).
-        DispatchQueue.main.async { [weak self] in
-            DispatchQueue.main.asyncAfter(deadline: .now() + Timing.shadowFrame) {
-                guard let self, !self.state[id].proxied, self.windows[id]?.parked == false else { return }
-                self.overlays.setRealBelow(id, true)
-            }
-        }
         writer.perform(pid: w.pid) { [weak self] in
             DispatchQueue.main.asyncAfter(deadline: .now() + Timing.handOverFade) {
                 guard let self else { return }
@@ -2893,12 +2878,6 @@ final class WindowManager {
         }
         let p = parkPoint(screen, size: size)
         writer.move(w.id, pid: w.pid, element: w.element, to: CGRect(origin: p, size: size), setSize: setSize)
-        // Gone from under its stand-in: the stand-in's own shadow takes over.
-        let id = w.id
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.windows[id]?.parked == true else { return }
-            self.overlays.setRealBelow(id, false)
-        }
         w.parked = true
         w.shrunk = false
         w.lastFrame = CGRect(origin: p, size: size)
@@ -2928,10 +2907,6 @@ final class WindowManager {
         overlays.onClick = { [weak self] id in
             Log.debug("peek clicked \(id)")
             self?.focus(id)
-        }
-        overlays.isKey = { [weak self] id in
-            guard let self, (self.keyWindow ?? self.trackedFocus) == id, let w = self.windows[id] else { return false }
-            return NSWorkspace.shared.frontmostApplication?.processIdentifier == w.pid
         }
         // A snapshot arrived for a window that started peeking: draw it now.
         snapshots.onReady = { [weak self] id in
@@ -2996,7 +2971,6 @@ final class WindowManager {
     /// without blocking the main thread on a slow app.
     private func activate(_ w: ManagedWindow) {
         trackedFocus = w.id
-        let id = w.id
         let pid = w.pid
         let element = w.element
         let name = w.appName
@@ -3006,7 +2980,6 @@ final class WindowManager {
             AX.set(AXUIElementCreateApplication(pid), kAXFrontmostAttribute, kCFBooleanTrue)
             AX.raise(element)
             Log.debug(String(format: "[focus] activating %@ took %.0f ms", name, (CACurrentMediaTime() - t0) * 1000))
-            DispatchQueue.main.async { [weak self] in self?.keyWindow = id }
         }
     }
 

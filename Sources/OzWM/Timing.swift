@@ -62,8 +62,6 @@ enum Timing {
     static let standInSettle: CFTimeInterval = 0.06
     /// A fresh peek's stand-in needs a frame or two to appear before its window is parked.
     static let parkAfterPeek: CFTimeInterval = 0.05
-    /// A real window back under its stand-in gets its shadow a frame later.
-    static let shadowFrame: CFTimeInterval = 0.017
     /// The stand-in fades this long after the app moved its window back.
     static let handOverFade: CFTimeInterval = 0.05
     /// The stand-in stops waiting for its window after this long.
