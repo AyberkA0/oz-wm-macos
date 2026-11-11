@@ -559,6 +559,9 @@ final class OverlayManager {
             window.contentView = view
         }
 
+        /// The window's corner radius (points) as its picture shows it, for pictures of this size.
+        var corner: (size: CGSize, radius: CGFloat)?
+
         func setImage(_ image: CGImage?) {
             self.image = image
             imageLayer.contents = image
@@ -681,6 +684,42 @@ final class OverlayManager {
         o.boardImage.frame = frame
     }
 
+    /// Where the visible part is cut off (at the zone's or the screen's edge), its corners are
+    /// rounded like the window's own, so the picture still looks like a window there.
+    private static func roundCut(_ layer: CALayer, _ o: Overlay, full: CGRect, top: CGFloat, bottom: CGFloat) {
+        var cut: CACornerMask = []
+        if top > full.minY + 0.5 { cut.formUnion([.layerMinXMaxYCorner, .layerMaxXMaxYCorner]) }
+        if bottom < full.maxY - 0.5 { cut.formUnion([.layerMinXMinYCorner, .layerMaxXMinYCorner]) }
+        let radius = cut.isEmpty ? 0 : cornerRadius(o)
+        if layer.cornerRadius != radius { layer.cornerRadius = radius }
+        if layer.maskedCorners != cut { layer.maskedCorners = cut }
+    }
+
+    /// The window's corner radius in points, read from its picture: how far along the diagonal
+    /// from the top left corner the picture is see-through (a circle's corner leaves 1 - 1/√2
+    /// of its radius there). Worked out once per picture size.
+    private static func cornerRadius(_ o: Overlay) -> CGFloat {
+        guard let image = o.image, o.expectedSize.width > 0 else { return 0 }
+        let size = CGSize(width: image.width, height: image.height)
+        if let c = o.corner, c.size == size { return c.radius }
+        let scale = CGFloat(image.width) / o.expectedSize.width
+        let n = min(image.width, image.height, Int(60 * scale))
+        var radius: CGFloat = 0
+        if n > 0, let part = image.cropping(to: CGRect(x: 0, y: 0, width: n, height: n)),
+           let ctx = CGContext(data: nil, width: n, height: n, bitsPerComponent: 8, bytesPerRow: n * 4,
+                               space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+           let data = ctx.data {
+            ctx.draw(part, in: CGRect(x: 0, y: 0, width: n, height: n))
+            let px = data.assumingMemoryBound(to: UInt8.self)
+            // Memory rows run top down: (i, i) walks in from the top left corner.
+            if let d = (0..<n).first(where: { px[($0 * n + $0) * 4 + 3] > 128 }) {
+                radius = (CGFloat(d) / (1 - 1 / 2.0.squareRoot()) / scale).rounded()
+            }
+        }
+        o.corner = (size, radius)
+        return radius
+    }
+
     /// Draws the visible part (`top`...`bottom`) of a window at `full` (AX coordinates): on
     /// its screen's board, or in its own window. Switching from the board to the window, the
     /// board's copy goes a moment after the window shows, so no frame is without it. In a
@@ -701,6 +740,7 @@ final class OverlayManager {
             o.boardImage.contentsScale = b.window.backingScaleFactor
             o.boardItem.frame = b.local(visible)
             o.boardClip.frame = o.boardItem.bounds
+            OverlayManager.roundCut(o.boardClip, o, full: full, top: top, bottom: bottom)
             if first { b.cover(true) }
             b.order(below: below, again: first)
             if o.inWindow {
@@ -715,6 +755,7 @@ final class OverlayManager {
         // Layer-backed content: no need to force a synchronous redraw every frame.
         let frame = NSRect(x: full.minX, y: Geometry.primaryHeight - bottom, width: full.width, height: bottom - top)
         o.window.setFrame(frame, display: false)
+        if let layer = o.window.contentView?.layer { OverlayManager.roundCut(layer, o, full: full, top: top, bottom: bottom) }
         if !o.inWindow {
             o.inWindow = true
             o.window.alphaValue = 1
