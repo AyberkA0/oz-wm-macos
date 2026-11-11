@@ -101,6 +101,9 @@ final class ShadowMaker {
                 waiting[key] = nil
             }
             busy = false
+            // Not left up between shapes: macOS brings a window it finds off every screen back
+            // onto one (a display change, waking), and there it showed as a white square.
+            if queue.isEmpty { panel.orderOut(nil) }
             next()
         }
     }
