@@ -1314,6 +1314,22 @@ final class WindowManager {
         writer.forget(pid: pid)
         for w in windows.values where w.pid == pid { unmanage(w.id, focusNeighbor: false) }
         for w in floating.values where w.pid == pid { forgetFloating(w.id) }
+        // Helpers without a Dock icon (Steam's, which holds its window) quit without a word
+        // from NSWorkspace, often just after the app they belong to: their windows stayed in
+        // the strip as empty rows.
+        forgetDeadProcesses()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.forgetDeadProcesses() }
+    }
+
+    private func forgetDeadProcesses() {
+        let dead = Set((windows.values.map(\.pid) + floating.values.map(\.pid)).filter { kill($0, 0) != 0 && errno == ESRCH })
+        for pid in dead {
+            Log.info("pid \(pid) is gone: forgetting its windows")
+            observers.removeValue(forKey: pid)
+            writer.forget(pid: pid)
+            for w in windows.values where w.pid == pid { unmanage(w.id, focusNeighbor: false) }
+            for w in floating.values where w.pid == pid { forgetFloating(w.id) }
+        }
     }
 
     private func appActivated(_ pid: pid_t) {
