@@ -84,6 +84,9 @@ enum Timing {
 
     /// The cursor rests this long in an edge band before the strip scrolls under a drag.
     static let bandDwell: CFTimeInterval = 0.35
+    /// Something dragged from another app rests this long on a window's picture before the
+    /// strip scrolls that window into view.
+    static let dragHoverReveal: CFTimeInterval = 0.5
 
     // MARK: Bookkeeping
 

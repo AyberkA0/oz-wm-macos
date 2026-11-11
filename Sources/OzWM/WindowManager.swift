@@ -2908,6 +2908,12 @@ final class WindowManager {
             Log.debug("peek clicked \(id)")
             self?.focus(id)
         }
+        // A file (or text, a link) held over a window's picture: the strip scrolls the window
+        // into view, real again under the cursor to take the drop.
+        overlays.onDragHover = { [weak self] id in
+            Log.debug("drag held over peek \(id)")
+            self?.reveal(id)
+        }
         // A snapshot arrived for a window that started peeking: draw it now.
         snapshots.onReady = { [weak self] id in
             guard let self, let (key, _) = self.locate(id) else { return }

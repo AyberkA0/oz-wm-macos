@@ -387,9 +387,42 @@ private final class BoardView: NSView {
 /// Click target for a peeking window: clicking the visible strip brings the real window back.
 /// A click, not a press: acting on mouse down started scrolling while the button was still
 /// held, and a press that turns into a drag isn't a click.
+/// Something dragged from any app (a file, text, a link) and held over it calls `onDragHover`,
+/// to bring the real window into view to take the drop: a picture takes none.
 private final class PeekView: NSView {
     var onClick: (() -> Void)?
+    var onDragHover: (() -> Void)?
     private var downAt: NSPoint?
+    private var hoverTimer: Timer?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        registerForDraggedTypes([.fileURL, .URL, .string, .rtf, .html, .tiff, .png, .pdf,
+                                 NSPasteboard.PasteboardType("public.data"),
+                                 NSPasteboard.PasteboardType("public.item"),
+                                 NSPasteboard.PasteboardType("com.apple.pasteboard.promised-file-url")])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        hoverTimer?.invalidate()
+        hoverTimer = Timer.scheduledTimer(withTimeInterval: Timing.dragHoverReveal, repeats: false) { [weak self] _ in
+            self?.hoverTimer = nil
+            self?.onDragHover?()
+        }
+        return []
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { [] }
+    override func draggingExited(_ sender: NSDraggingInfo?) { stopHover() }
+    override func draggingEnded(_ sender: NSDraggingInfo) { stopHover() }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool { false }
+
+    private func stopHover() {
+        hoverTimer?.invalidate()
+        hoverTimer = nil
+    }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func mouseDown(with event: NSEvent) { downAt = NSEvent.mouseLocation }
     override func mouseUp(with event: NSEvent) {
@@ -483,6 +516,8 @@ private final class Board {
 final class OverlayManager {
     /// Called with the window id when the user clicks a peeking window.
     var onClick: ((CGWindowID) -> Void)?
+    /// Called with the window id when something dragged is held over a peeking window.
+    var onDragHover: ((CGWindowID) -> Void)?
     /// Stream live content into peeks instead of showing a still snapshot.
     var live = true
     var liveFPS = 24.0
@@ -623,6 +658,7 @@ final class OverlayManager {
         } else {
             o = Overlay(id: id)
             (o.window.contentView as? PeekView)?.onClick = { [weak self] in self?.onClick?(id) }
+            (o.window.contentView as? PeekView)?.onDragHover = { [weak self] in self?.onDragHover?(id) }
             overlays[id] = o
         }
         o.expectedSize = full.size
