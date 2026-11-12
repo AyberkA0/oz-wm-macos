@@ -216,13 +216,15 @@ public final class Strip {
         }
     }
 
-    /// Moves a window up/down. A window sharing a row is first expelled into its own row.
+    /// Moves a window up/down. A window sharing a row is first expelled into its own row,
+    /// which it fills (its share of the row it left means nothing alone), as with `barfOut`.
     @discardableResult
     public func moveVertical(_ id: WinID, by delta: Int) -> Bool {
         guard let (r, c) = locate(id) else { return false }
         let row = rows[r]
         if row.windows.count > 1 {
             row.windows.remove(at: c)
+            widthWeights[id] = nil
             rows.insert(Row([id], height: row.height), at: delta > 0 ? r + 1 : r)
             return true
         }
@@ -280,6 +282,7 @@ public final class Strip {
         let row = rows[r]
         if row.windows.count > 1 {
             row.windows.remove(at: c)
+            widthWeights[id] = nil
             rows.insert(Row([id], height: row.height), at: top ? 0 : rows.count)
         } else {
             rows.remove(at: r)

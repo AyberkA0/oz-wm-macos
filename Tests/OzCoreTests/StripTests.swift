@@ -200,6 +200,21 @@ final class StripTests: XCTestCase {
         XCTAssertEqual(s.remove(3), 1)
     }
 
+    func testWindowMovedOutOfASharedRowFillsItsOwn() {
+        // 1 has a third of the row it shares with 2: moved down, up to the top or out, it is
+        // alone in a row and fills it (its share of the old row means nothing there).
+        for move in [{ (s: Strip) in _ = s.moveVertical(1, by: 1) }, { $0.moveToEdge(1, top: true) }, { _ = $0.barfOut(1) }] {
+            let s = makeStrip([400])
+            s.insertBeside(2, anchor: 1, right: true)
+            s.setWidthFraction(1, 1.0 / 3)
+            move(s)
+            XCTAssertEqual(s.rows.count, 2)
+            let widths = Dictionary(uniqueKeysWithValues: s.layout(params, scroll: 0).map { ($0.id, $0.frame.width) })
+            XCTAssertEqual(widths[1], params.viewport.width)
+            XCTAssertEqual(widths[2], params.viewport.width)
+        }
+    }
+
     func testMoveAndNeighbors() {
         let s = makeStrip([300, 300, 300])
         XCTAssertTrue(s.moveVertical(1, by: 1))
