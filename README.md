@@ -204,6 +204,8 @@ Menu bar › *Keep Windows Alive (Live Capture)* controls how windows cut off at
 make check-config
 ```
 
+It reports errors in the script, and what Oz can't use though the script runs: settings it doesn't know (a misspelt name), values it doesn't take, and shortcuts for commands that don't exist or on keys that couldn't be set. Those are left out (the setting keeps its default, the keys stay free); the Oz menu and the log name them too.
+
 ```js
 oz.set({
   gap: 10, outerGap: 10, width: 1.0,

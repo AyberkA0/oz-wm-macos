@@ -32,10 +32,12 @@ case "--check-config":
     print("swipe: enabled=\(s.swipe.enabled) fingers=\(s.swipe.fingers) sensitivity=\(s.swipe.sensitivity) natural=\(s.swipe.natural) snap=\(s.swipe.snap)")
     print("doubleTap: enabled=\(s.doubleTap.enabled) fingers=\(s.doubleTap.fingers) action=\(s.doubleTap.action)")
     print("bindings (\(engine.boundCombos.count)): \(engine.boundCombos.joined(separator: ", "))")
+    engine.warnings.forEach { print("WARNING: \($0)") }
     if let e = engine.lastError {
         print("ERROR: \(e)")
         exit(1)
     }
+    if !engine.warnings.isEmpty { exit(1) }
     print("OK")
     exit(0)
 case "--version":

@@ -93,64 +93,63 @@ public struct Settings {
         apply(json)
     }
 
-    public mutating func apply(_ j: [String: Any]) {
-        let num = Settings.number
-        if let v = num(j["gap"]) { gap = CGFloat(max(0, v)) }
-        if let v = num(j["outerGap"]) { outerGap = CGFloat(max(0, v)) }
-        if let v = num(j["width"]) { width = CGFloat(min(max(v, 0.1), 1)) }
-        if let a = j["heights"] as? [Any] {
-            let r = a.compactMap(num).filter { $0 > 0 && $0 <= 1 }.map { CGFloat($0) }
-            if !r.isEmpty { heights = r }
-        }
-        if let v = num(j["defaultHeight"]), v > 0, v <= 1 { defaultHeight = CGFloat(v) }
-        if let a = j["widths"] as? [Any] {
-            let r = a.compactMap(num).filter { $0 > 0 && $0 < 1 }.map { CGFloat($0) }
-            if !r.isEmpty { widths = r }
-        }
-        if let v = num(j["resizeStep"]), v > 0, v < 1 { resizeStep = CGFloat(v) }
-        if let v = j["keepInitialHeights"] as? Bool { keepInitialHeights = v }
-        if let v = j["newWindowPosition"] as? String, let p = InsertPosition(rawValue: v) { newWindowPosition = p }
-        if let v = num(j["animationDuration"]) { animationDuration = max(0, v) }
-        if let v = j["topOverflow"] as? String, let t = TopOverflow(rawValue: v) { topOverflow = t }
-        if let v = num(j["minVisible"]) { minVisible = CGFloat(max(0, v)) }
-        if let v = j["livePeek"] as? Bool { livePeek = v }
-        if let v = num(j["livePeekFPS"]), v > 0 { livePeekFPS = min(v, 60) }
-        if let v = num(j["captureScale"]), v > 0, v <= 1 { captureScale = CGFloat(max(v, 0.1)) }
-        if let v = j["slowAppProxy"] as? Bool { slowAppProxy = v }
-        if let v = j["smoothScroll"] as? Bool { smoothScroll = v }
-        if let v = num(j["slowAppThreshold"]), v > 0 { slowAppThreshold = v }
-        if let a = j["passThroughApps"] as? [Any] { passThroughApps = a.compactMap { $0 as? String } }
-        if let v = j["demoMode"] as? Bool { demoMode = v }
-        if let b = j["scrollButtons"] as? [String: Any] {
+    /// Takes the values of a config object (`oz.set`, or the Settings window's own changes).
+    /// Returns what it couldn't use, each as "name: what's wrong": settings it doesn't know
+    /// and values it doesn't take, which stay as they were.
+    @discardableResult
+    public mutating func apply(_ j: [String: Any]) -> [String] {
+        var r = ConfigReader(j)
+        let share = "above 0, up to 1"
+        if let v = r.number("gap") { gap = CGFloat(max(0, v)) }
+        if let v = r.number("outerGap") { outerGap = CGFloat(max(0, v)) }
+        if let v = r.number("width") { width = CGFloat(min(max(v, 0.1), 1)) }
+        if let v = r.numbers("heights", share, where: { $0 > 0 && $0 <= 1 }) { heights = v.map { CGFloat($0) } }
+        if let v = r.number("defaultHeight", share, where: { $0 > 0 && $0 <= 1 }) { defaultHeight = CGFloat(v) }
+        if let v = r.numbers("widths", "above 0, below 1", where: { $0 > 0 && $0 < 1 }) { widths = v.map { CGFloat($0) } }
+        if let v = r.number("resizeStep", "above 0, below 1", where: { $0 > 0 && $0 < 1 }) { resizeStep = CGFloat(v) }
+        if let v = r.bool("keepInitialHeights") { keepInitialHeights = v }
+        if let v = r.choice("newWindowPosition", InsertPosition.self) { newWindowPosition = v }
+        if let v = r.number("animationDuration") { animationDuration = max(0, v) }
+        if let v = r.choice("topOverflow", TopOverflow.self) { topOverflow = v }
+        if let v = r.number("minVisible") { minVisible = CGFloat(max(0, v)) }
+        if let v = r.bool("livePeek") { livePeek = v }
+        if let v = r.number("livePeekFPS", "above 0", where: { $0 > 0 }) { livePeekFPS = min(v, 60) }
+        if let v = r.number("captureScale", share, where: { $0 > 0 && $0 <= 1 }) { captureScale = CGFloat(max(v, 0.1)) }
+        if let v = r.bool("slowAppProxy") { slowAppProxy = v }
+        if let v = r.bool("smoothScroll") { smoothScroll = v }
+        if let v = r.number("slowAppThreshold", "above 0", where: { $0 > 0 }) { slowAppThreshold = v }
+        if let v = r.strings("passThroughApps") { passThroughApps = v }
+        if let v = r.bool("demoMode") { demoMode = v }
+        if var b = r.group("scrollButtons") {
             // An empty string clears one (the Settings window's Clear, over the config's).
-            if let v = b["up"] as? String { scrollUpButton = v.isEmpty ? nil : v }
-            if let v = b["down"] as? String { scrollDownButton = v.isEmpty ? nil : v }
-            if let v = b["desktopModifier"] as? String,
-               ["shift", "control", "option", "command", "none"].contains(v) { desktopModifier = v }
+            if let v = b.string("up") { scrollUpButton = v.isEmpty ? nil : v }
+            if let v = b.string("down") { scrollDownButton = v.isEmpty ? nil : v }
+            if let v = b.string("desktopModifier", oneOf: ["shift", "control", "option", "command", "none"]) { desktopModifier = v }
+            r.take(b)
         }
-        if let v = j["debug"] as? Bool { debug = v }
+        if let v = r.bool("debug") { debug = v }
 
-        if let s = j["swipe"] as? [String: Any] {
-            if let v = s["enabled"] as? Bool { swipe.enabled = v }
-            if let v = num(s["fingers"]) { swipe.fingers = min(max(Int(v), 2), 5) }
-            if let v = num(s["sensitivity"]), v > 0 { swipe.sensitivity = v }
-            if let v = s["natural"] as? Bool { swipe.natural = v }
-            if let v = s["snap"] as? String, let m = SnapMode(rawValue: v) {
-                swipe.snap = m
-            } else if let v = s["snap"] as? Bool {
-                swipe.snap = v ? .always : .off
-            }
-            if let v = num(s["snapDistance"]) { swipe.snapDistance = CGFloat(max(0, v)) }
-            if let v = num(s["momentum"]) { swipe.momentum = max(0, v) }
-            if let v = s["focus"] as? Bool { swipe.focus = v }
-            if let v = num(s["threshold"]), v > 0 { swipe.threshold = v }
+        if var s = r.group("swipe") {
+            if let v = s.bool("enabled") { swipe.enabled = v }
+            if let v = s.number("fingers") { swipe.fingers = min(max(Int(v), 2), 5) }
+            if let v = s.number("sensitivity", "above 0", where: { $0 > 0 }) { swipe.sensitivity = v }
+            if let v = s.bool("natural") { swipe.natural = v }
+            // A mode, or true / false for "always" / "off".
+            if let v = s.choice("snap", SnapMode.self, orBool: { $0 ? .always : .off }) { swipe.snap = v }
+            if let v = s.number("snapDistance") { swipe.snapDistance = CGFloat(max(0, v)) }
+            if let v = s.number("momentum") { swipe.momentum = max(0, v) }
+            if let v = s.bool("focus") { swipe.focus = v }
+            if let v = s.number("threshold", "above 0", where: { $0 > 0 }) { swipe.threshold = v }
+            r.take(s)
         }
-        if let d = j["doubleTap"] as? [String: Any] {
-            if let v = d["enabled"] as? Bool { doubleTap.enabled = v }
-            if let v = num(d["fingers"]) { doubleTap.fingers = min(max(Int(v), 2), 5) }
-            if let v = d["action"] as? String, !v.isEmpty { doubleTap.action = v }
-            if let v = num(d["interval"]), v > 0 { doubleTap.interval = v }
+        if var d = r.group("doubleTap") {
+            if let v = d.bool("enabled") { doubleTap.enabled = v }
+            if let v = d.number("fingers") { doubleTap.fingers = min(max(Int(v), 2), 5) }
+            if let v = d.string("action"), !v.isEmpty { doubleTap.action = v }
+            if let v = d.number("interval", "above 0", where: { $0 > 0 }) { doubleTap.interval = v }
+            r.take(d)
         }
+        return r.finish()
     }
 
     public func passesThrough(bundleID: String?, name: String?) -> Bool {
@@ -158,8 +157,131 @@ public struct Settings {
         return passThroughApps.contains { keys.contains($0.lowercased()) }
     }
 
-    private static func number(_ v: Any?) -> Double? {
+}
+
+/// Reads the values of a config object by name, noting what can't be used: a value of the
+/// wrong kind or out of range and, once done, names nothing asked for (a misspelt setting).
+struct ConfigReader {
+    private let object: [String: Any]
+    private let prefix: String
+    private var asked = Set<String>()
+    private var problems: [String] = []
+
+    init(_ object: [String: Any], prefix: String = "") {
+        self.object = object
+        self.prefix = prefix
+    }
+
+    /// The value under `key`, if there is one (null counts as none).
+    private mutating func value(_ key: String) -> Any? {
+        asked.insert(key)
+        guard let v = object[key], !(v is NSNull) else { return nil }
+        return v
+    }
+
+    private mutating func reject(_ key: String, _ value: Any, _ expected: String) {
+        problems.append("\(prefix)\(key): \(Self.show(value)) is not \(expected)")
+    }
+
+    /// A number (not true / false), which `ok` accepts; `range` says what that takes.
+    mutating func number(_ key: String, _ range: String? = nil, where ok: (Double) -> Bool = { _ in true }) -> Double? {
+        guard let v = value(key) else { return nil }
+        guard let n = Self.number(v), ok(n) else {
+            reject(key, v, "a number" + (range.map { " " + $0 } ?? ""))
+            return nil
+        }
+        return n
+    }
+
+    /// A list of such numbers, not empty.
+    mutating func numbers(_ key: String, _ range: String, where ok: (Double) -> Bool) -> [Double]? {
+        guard let v = value(key) else { return nil }
+        guard let a = v as? [Any], !a.isEmpty, case let n = a.compactMap(Self.number).filter(ok), n.count == a.count else {
+            reject(key, v, "a list of numbers \(range)")
+            return nil
+        }
+        return n
+    }
+
+    mutating func bool(_ key: String) -> Bool? {
+        guard let v = value(key) else { return nil }
+        guard let b = v as? Bool else {
+            reject(key, v, "true or false")
+            return nil
+        }
+        return b
+    }
+
+    mutating func string(_ key: String, oneOf options: [String]? = nil) -> String? {
+        guard let v = value(key) else { return nil }
+        guard let s = v as? String, options?.contains(s) ?? true else {
+            reject(key, v, options.map(Self.oneOf) ?? "text")
+            return nil
+        }
+        return s
+    }
+
+    mutating func strings(_ key: String) -> [String]? {
+        guard let v = value(key) else { return nil }
+        guard let a = v as? [Any], case let s = a.compactMap({ $0 as? String }), s.count == a.count else {
+            reject(key, v, "a list of texts")
+            return nil
+        }
+        return s
+    }
+
+    /// One of an enum's names; `orBool` also takes true / false for two of them.
+    mutating func choice<T: RawRepresentable & CaseIterable>(_ key: String, _: T.Type, orBool: ((Bool) -> T)? = nil) -> T?
+    where T.RawValue == String {
+        guard let v = value(key) else { return nil }
+        if let s = v as? String, let c = T(rawValue: s) { return c }
+        if let orBool, Self.number(v) == nil, let b = v as? Bool { return orBool(b) }
+        reject(key, v, Self.oneOf(T.allCases.map(\.rawValue)) + (orBool == nil ? "" : ", true or false"))
+        return nil
+    }
+
+    /// A group of settings under `key` ("swipe"): read it, then hand it back with `take`.
+    mutating func group(_ key: String) -> ConfigReader? {
+        guard let v = value(key) else { return nil }
+        guard let d = v as? [String: Any] else {
+            reject(key, v, "a group of settings ({ ... })")
+            return nil
+        }
+        return ConfigReader(d, prefix: prefix + key + ".")
+    }
+
+    /// Takes over what a group read with `group` found.
+    mutating func take(_ group: ConfigReader) {
+        var g = group
+        problems += g.finish()
+    }
+
+    /// Everything that couldn't be used, the names nothing asked for among them.
+    mutating func finish() -> [String] {
+        for key in object.keys.sorted() where !asked.contains(key) {
+            problems.append("\(prefix)\(key): no such setting")
+        }
+        return problems
+    }
+
+    private static func number(_ v: Any) -> Double? {
         guard let n = v as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID() else { return nil }
         return n.doubleValue
+    }
+
+    private static func oneOf(_ options: [String]) -> String {
+        "one of " + options.map { "\"\($0)\"" }.joined(separator: ", ")
+    }
+
+    /// A value as the config would write it, short.
+    private static func show(_ v: Any) -> String {
+        switch v {
+        case let s as String: return "\"\(s)\""
+        case let n as NSNumber:
+            return CFGetTypeID(n) == CFBooleanGetTypeID() ? (n.boolValue ? "true" : "false") : "\(n)"
+        case is [Any]: return "that list"
+        case is [String: Any]: return "that group"
+        default: return "that"
+        }
     }
 }

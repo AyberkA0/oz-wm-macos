@@ -10,6 +10,11 @@ final class ConfigEngine {
     private var watcher: DispatchSourceFileSystemObject?
     private var lastModified: Date?
     private(set) var lastError: String?
+    /// What the config asks for that Oz can't do, though it loaded: settings it doesn't know,
+    /// values it doesn't take, shortcuts for commands that don't exist or that couldn't be set.
+    var warnings: [String] { settingsProblems + bindProblems }
+    private var settingsProblems: [String] = []
+    private var bindProblems: [String] = []
     private(set) var settings = Settings()
     /// Validate only: parse hotkeys without registering them (`OzWM --check-config`).
     var dryRun = false
@@ -41,6 +46,8 @@ final class ConfigEngine {
         if !dryRun { HotkeyCenter.shared.unregisterAll() }
         boundCombos = []
         lastError = nil
+        settingsProblems = []
+        bindProblems = []
         settings = Settings()
         ensureConfigFile()
 
@@ -61,9 +68,15 @@ final class ConfigEngine {
         let setSettings: @convention(block) (String) -> Void = { [weak self] json in
             guard let self, let data = json.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            // Every `oz.set` sends the whole of what was set so far: its problems replace the last ones.
             var s = Settings()
-            s.apply(obj)
+            var problems = s.apply(obj)
+            let action = s.doubleTap.action
+            if !action.hasPrefix("binding:"), Command(rawValue: action) == nil {
+                problems.append("doubleTap.action: \"\(action)\" is not a command")
+            }
             self.settings = s
+            self.settingsProblems = problems
         }
         let bind: @convention(block) (String, Int) -> Bool = { [weak self] combo, id in
             guard let self else { return false }
@@ -77,6 +90,7 @@ final class ConfigEngine {
             self?.wm.perform(name, arg: ConfigEngine.native(arg)) ?? false
         }
         let log: @convention(block) (String) -> Void = { Log.info("[config] \($0)") }
+        let warn: @convention(block) (String) -> Void = { [weak self] in self?.bindProblems.append($0) }
         let notify: @convention(block) (String, String) -> Void = { title, text in
             let esc = { (s: String) in s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") }
             SystemActions.run("/usr/bin/osascript",
@@ -95,6 +109,7 @@ final class ConfigEngine {
         expose("bind", unsafeBitCast(bind, to: AnyObject.self))
         expose("command", unsafeBitCast(command, to: AnyObject.self))
         expose("log", unsafeBitCast(log, to: AnyObject.self))
+        expose("warn", unsafeBitCast(warn, to: AnyObject.self))
         expose("notify", unsafeBitCast(notify, to: AnyObject.self))
         expose("exec", unsafeBitCast(exec, to: AnyObject.self))
         expose("shell", unsafeBitCast(shell, to: AnyObject.self))
@@ -114,6 +129,7 @@ final class ConfigEngine {
         context = ctx
         lastModified = modificationDate()
         Log.info(lastError == nil ? "config loaded" : "config loaded with error: \(lastError!)")
+        warnings.forEach { Log.info("config warning: \($0)") }
         onLoaded?(settings)
         emit("configLoaded", [:])
     }
@@ -185,6 +201,7 @@ final class ConfigEngine {
       var nextId = 1;
       var handlers = {};
       var rules = [];
+      var commands = __COMMANDS__;
 
       function isPlain(v) { return v !== null && typeof v === 'object' && !Array.isArray(v) && !(v instanceof RegExp); }
       function merge(dst, src) {
@@ -221,7 +238,14 @@ final class ConfigEngine {
           if (typeof action !== 'string' && typeof action !== 'function') {
             throw new Error("oz.bind('" + combo + "'): action must be a command name or a function");
           }
-          if (!__native.bind(String(combo), register(action))) oz.log("oz.bind: could not bind '" + combo + "'");
+          // A command that doesn't exist (a misspelt name) would take the keys and do nothing.
+          if (typeof action === 'string' && commands.indexOf(action) < 0) {
+            __native.warn("oz.bind('" + combo + "'): \"" + action + "\" is not a command");
+            return;
+          }
+          if (!__native.bind(String(combo), register(action))) {
+            __native.warn("oz.bind('" + combo + "'): could not bind these keys (not a key Oz knows, or taken)");
+          }
         },
         // Events: windowCreated, windowFocused, swipeEnded, spaceChanged, configLoaded
         on: function (event, fn) { (handlers[event] = handlers[event] || []).push(fn); },
@@ -256,7 +280,7 @@ final class ConfigEngine {
           return JSON.stringify(out);
         }
       };
-      __COMMANDS__.forEach(function (c) { oz[c] = function (arg) { return oz.command(c, arg); }; });
+      commands.forEach(function (c) { oz[c] = function (arg) { return oz.command(c, arg); }; });
       return oz;
     })();
     """#

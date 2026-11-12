@@ -277,6 +277,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let err = config.lastError {
                 item("⚠︎ Config error: \(err)", nil).isEnabled = false
             }
+            if let first = config.warnings.first {
+                let more = config.warnings.count - 1
+                item("⚠︎ Config: \(first)" + (more > 0 ? " (and \(more) more, see the log)" : ""), nil).isEnabled = false
+            }
             if wm.settings.topOverflow == .slide && !SnapshotCache.hasPermission {
                 item("⚠︎ Allow Screen Recording for the slide-off effect…", #selector(openScreenRecordingSettings))
             }

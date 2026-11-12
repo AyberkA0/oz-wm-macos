@@ -90,4 +90,31 @@ final class GestureTests: XCTestCase {
         XCTAssertEqual(s.topOverflow, .hide)
         XCTAssertTrue(s.debug)
     }
+
+    func testSettingsReportWhatTheyCantUse() {
+        // What the example config sets: nothing to report.
+        var s = Settings()
+        XCTAssertEqual(s.apply(["gap": 4, "heights": [0.25, 1], "passThroughApps": ["UTM"], "swipe": ["snap": false],
+                                "scrollButtons": ["up": "mouse:3", "down": ""], "doubleTap": ["action": "binding:1"]]), [])
+        // A misspelt name, values out of range or of the wrong kind: each named, none taken.
+        s = Settings()
+        let problems = s.apply(["gapp": 12, "newWindowPosition": "bottom", "defaultHeight": 2, "livePeek": "yes",
+                                "heights": [0.5, 3], "swipe": ["snap": "sometimes", "speed": 2], "doubleTap": 3])
+        XCTAssertEqual(Set(problems), [
+            "gapp: no such setting",
+            "newWindowPosition: \"bottom\" is not one of \"below\", \"above\", \"end\", \"start\"",
+            "defaultHeight: 2 is not a number above 0, up to 1",
+            "livePeek: \"yes\" is not true or false",
+            "heights: that list is not a list of numbers above 0, up to 1",
+            "swipe.snap: \"sometimes\" is not one of \"always\", \"near\", \"off\", true or false",
+            "swipe.speed: no such setting",
+            "doubleTap: 3 is not a group of settings ({ ... })",
+        ])
+        XCTAssertEqual(s.gap, 10)
+        XCTAssertEqual(s.newWindowPosition, .below)
+        XCTAssertEqual(s.defaultHeight, 0.5)
+        XCTAssertTrue(s.livePeek)
+        XCTAssertEqual(s.heights.count, 4)
+        XCTAssertEqual(s.swipe.snap, .near)
+    }
 }

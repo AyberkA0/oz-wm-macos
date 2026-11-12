@@ -28,7 +28,7 @@ public enum Placement: Equatable {
 
 /// What to do with a window that is partially scrolled above the top edge.
 /// macOS won't let windows go above the menu bar, so we can't simply move it up.
-public enum TopOverflow: String {
+public enum TopOverflow: String, CaseIterable {
     /// Let it slide off the top like it does at the bottom (drawn from a snapshot while moving).
     case slide
     /// Pin it to the top edge and shrink it to the still-visible part.
@@ -38,7 +38,7 @@ public enum TopOverflow: String {
 }
 
 /// How a swipe comes to rest.
-public enum SnapMode: String {
+public enum SnapMode: String, CaseIterable {
     /// Every swipe moves exactly one window, in its direction (however far or fast).
     case always
     /// Glide freely; settle on a window edge only when released close to one.
@@ -57,7 +57,7 @@ public struct LayoutItem {
     public let frame: CGRect
 }
 
-public enum InsertPosition: String {
+public enum InsertPosition: String, CaseIterable {
     case below, above, end, start
 }
 
