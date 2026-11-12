@@ -4,7 +4,7 @@
 
 <p align="center">
   <img alt="macOS 14+" src="https://img.shields.io/badge/macOS-14%2B-1c8a5c?style=flat-square&logo=apple&logoColor=white">
-  <img alt="Swift 5.9" src="https://img.shields.io/badge/Swift-5.9-f2bd3a?style=flat-square&logo=swift&logoColor=white">
+  <img alt="Swift 6" src="https://img.shields.io/badge/Swift-6-f2bd3a?style=flat-square&logo=swift&logoColor=white">
   <img alt="Trackpad gestures" src="https://img.shields.io/badge/trackpad-three--finger%20swipe-7fd6a3?style=flat-square">
 </p>
 
@@ -57,7 +57,26 @@
 
 ## Installation
 
-Requires macOS 14 or later and Xcode / Swift 5.9 or later.
+Requires macOS 14 or later.
+
+### Download
+
+Each [release](https://github.com/AyberkA0/oz-wm-macos/releases) has an `Oz-v….zip` with the app, for Macs with Apple silicon (on an Intel Mac, build it from source):
+
+1. Unzip it and move `Oz.app` to your Applications folder.
+2. Open it. Oz is signed with its author's own certificate, not one from Apple, so macOS refuses the first time: close that message, then choose System Settings › Privacy & Security › *Open Anyway*.
+
+   Or tell macOS beforehand that you trust the download:
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/Oz.app
+   ```
+
+To update, quit Oz and replace `Oz.app` with the new one; its permissions and settings stay.
+
+### Build from source
+
+Requires Xcode 16 / Swift 6 or later.
 
 ```bash
 make run        # build build/Oz.app and start it
@@ -66,7 +85,7 @@ make test       # run the unit tests
 make stop       # quit the running Oz
 ```
 
-On first launch:
+### First launch
 
 1. **Accessibility.** Enable Oz in System Settings › Privacy & Security › Accessibility. Oz starts as soon as the permission is granted.
 2. **Trackpad.** If the three-finger vertical swipe is still assigned to Mission Control, Oz offers to take it over. If you choose *Apply*:
