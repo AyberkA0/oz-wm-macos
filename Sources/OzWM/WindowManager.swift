@@ -1379,7 +1379,7 @@ final class WindowManager {
         }
         if !refocus { restoreMaximized(focusing: w) }
         trackedFocus = w.id
-        guard gesture == nil, windows[w.id] != nil, let (key, strip) = locate(w.id) else { return }
+        guard gesture == nil, windows[w.id] != nil, let (_, strip) = locate(w.id) else { return }
         let wid = w.id
         strip.focused = wid
         if NSEvent.pressedMouseButtons & 1 != 0 {
@@ -2760,8 +2760,8 @@ final class WindowManager {
             park(w, screen: screen, size: size)
         }
         Log.debug("re-snapshot \(id) \(w.appName) at \(Int(size.width))x\(Int(size.height))")
-        writer.perform(pid: w.pid) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + Timing.resnapCapture) { [weak self] in
+        writer.perform(pid: w.pid) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + Timing.resnapCapture) {
                 guard let self else { return }
                 self.state[id].resnapping = false
                 guard self.windows[id] != nil else { return }
@@ -3687,7 +3687,7 @@ final class WindowManager {
                         let target = self.fullScreenFrame(screen)
                         self.state[id].zoom = .init(before: actual, byOz: true)
                         self.floating[id]?.zoomedFrame = target
-                        self.animateFloating(w, from: actual, to: target) { [weak self] in self?.state[id].zoom?.byOz == true }
+                        self.animateFloating(w, from: actual, to: target) { self.state[id].zoom?.byOz == true }
                         Log.info("zoomed floating \(id) \(w.appName) for its app")
                         self.verifyForcedZoom(id)
                     }
