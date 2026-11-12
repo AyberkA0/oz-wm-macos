@@ -62,6 +62,8 @@ oz.set({
   // Held with them (desktopModifier: "shift" | "control" | "option" | "command" | "none"),
   // up goes to the desktop on the left and down to the one on the right.
   // scrollButtons: { up: "mouse:3", down: "mouse:4", desktopModifier: "shift" },
+  disableWallpaperTinting: true, // while Oz runs, macOS's "Allow wallpaper tinting in windows" is off (put back when it
+                                 // quits), so pictures of windows have the windows' colours; false leaves that setting alone
   demoMode: false,               // ctrl+alt+shift+o opens Wizard of Oz demo windows (also in Settings)
   debug: false,                  // verbose log
 });

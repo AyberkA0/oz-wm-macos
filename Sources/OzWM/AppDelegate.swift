@@ -65,7 +65,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
             reason: "Window management reacts to gestures in real time")
         Watchdog.start()
-        disableWallpaperTinting()
 
         wm.rulesProvider = { [unowned self] w in config.rules(for: w) }
         wm.emit = { [unowned self] event, payload in config.emit(event, payload) }
@@ -223,7 +222,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Appearance › "Allow wallpaper tinting in windows"). Windows Oz parks off screen lose
     /// that tint, so the stand-ins drawn from their captures would look different from the
     /// real windows. Oz therefore keeps the tint off while it runs and restores the user's
-    /// choice when it quits.
+    /// choice when it quits, unless `disableWallpaperTinting` is false: then it leaves the
+    /// setting alone (and puts it back at once if it had turned it off).
     private static let tintKey = "AppleReduceDesktopTinting" as CFString
     private static let savedTintKey = "tintingWasOnBeforeOz"
 
@@ -338,6 +338,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         gestures.configure(s)
         if started { wm.settingsChanged(); updatePassThrough() }
         updateDemo(s.demoMode)
+        if s.disableWallpaperTinting { disableWallpaperTinting() } else { restoreWallpaperTinting() }
         scrollButtons.desktopModifier = [
             "shift": CGEventFlags.maskShift, "control": .maskControl, "option": .maskAlternate, "command": .maskCommand,
         ][s.desktopModifier]

@@ -75,6 +75,10 @@ public struct Settings {
         "com.apple.ScreenSharing", "com.realvnc.vncviewer", "com.p5sys.jump.mac.viewer",
         "com.teamviewer.TeamViewer", "com.anydesk.anydeskmacos", "com.nvidia.gfnpc.mall",
     ]
+    /// While Oz runs it turns off macOS's "Allow wallpaper tinting in windows" (and puts it
+    /// back when it quits), so a window's picture has the window's own colours. False leaves
+    /// that setting alone: pictures of windows may then look a little greyer than the windows.
+    public var disableWallpaperTinting = true
     /// Demo mode: a shortcut (ctrl+alt+shift+o) opens stand-in Wizard of Oz windows.
     public var demoMode = false
     /// Buttons (a mouse's side buttons, a key, a media key) that scroll the strip one step up
@@ -120,6 +124,7 @@ public struct Settings {
         if let v = r.number("slowAppThreshold", "above 0", where: { $0 > 0 }) { slowAppThreshold = v }
         if let v = r.strings("passThroughApps") { passThroughApps = v }
         if let v = r.bool("demoMode") { demoMode = v }
+        if let v = r.bool("disableWallpaperTinting") { disableWallpaperTinting = v }
         if var b = r.group("scrollButtons") {
             // An empty string clears one (the Settings window's Clear, over the config's).
             if let v = b.string("up") { scrollUpButton = v.isEmpty ? nil : v }
