@@ -119,10 +119,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         DistributedNotificationCenter.default().addObserver(forName: commandNotification, object: nil,
                                                             queue: .main) { [weak self] n in
-            guard let name = n.object as? String else { return }
-
+            guard let self, let name = n.object as? String else { return }
             let arg = n.userInfo?["arg"] as? String
-            self?.wm.perform(name, arg: arg.flatMap { Double($0) }.map { NSNumber(value: $0) } ?? arg)
+            let done = self.wm.perform(name, arg: arg.flatMap { Double($0) }.map { NSNumber(value: $0) } ?? arg)
+            // `OzWM msg` waits to hear how it went.
+            guard let reply = n.userInfo?["reply"] as? String, reply.hasPrefix("dev.oz.wm.reply.") else { return }
+            let answer = Command(rawValue: name) == nil ? "unknown" : done ? "ok" : "failed"
+            DistributedNotificationCenter.default().postNotificationName(Notification.Name(reply), object: answer,
+                                                                         userInfo: nil, deliverImmediately: true)
         }
 
         Log.info("Oz started")

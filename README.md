@@ -246,6 +246,8 @@ build/Oz.app/Contents/MacOS/OzWM msg focusDown
 build/Oz.app/Contents/MacOS/OzWM msg setHeight 0.5
 ```
 
+`msg` waits for Oz's answer (a moment) and says how it went with its exit status: 0 when Oz did it, 1 when there is no such command or Oz had nothing to do for it (the reason is printed), 2 when Oz didn't answer because it isn't running.
+
 <p align="center"><img src="docs/media/road.svg" alt="" width="100%"></p>
 
 ## How it works

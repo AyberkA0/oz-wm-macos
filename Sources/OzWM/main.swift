@@ -11,10 +11,29 @@ case "msg":
         FileHandle.standardError.write("usage: OzWM msg <command> [arg]\n".data(using: .utf8)!)
         exit(1)
     }
-    DistributedNotificationCenter.default().postNotificationName(
-        commandNotification, object: args[1],
-        userInfo: args.count >= 3 ? ["arg": args[2]] : nil, deliverImmediately: true)
-    exit(0)
+    // Oz answers on a name of this process's own: whether it knew the command and did it.
+    let center = DistributedNotificationCenter.default()
+    let reply = "dev.oz.wm.reply.\(getpid())"
+    var answer: String?
+    let observer = center.addObserver(forName: Notification.Name(reply), object: nil, queue: nil) { answer = $0.object as? String }
+    var info = ["reply": reply]
+    if args.count >= 3 { info["arg"] = args[2] }
+    center.postNotificationName(commandNotification, object: args[1], userInfo: info, deliverImmediately: true)
+    let deadline = Date().addingTimeInterval(1)
+    while answer == nil, Date() < deadline {
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+    }
+    center.removeObserver(observer)
+    func fail(_ message: String, _ status: Int32) -> Never {
+        FileHandle.standardError.write((message + "\n").data(using: .utf8)!)
+        exit(status)
+    }
+    switch answer {
+    case "ok": exit(0)
+    case "unknown": fail("Oz has no command named '\(args[1])'", 1)
+    case nil: fail("no answer from Oz: it isn't running (or is still waiting for Accessibility)", 2)
+    default: fail("Oz had nothing to do for '\(args[1])' (no window to act on, or a value it doesn't take)", 1)
+    }
 case "demo":
     // The demo app: Wizard of Oz windows for demo mode, started by Oz itself.
     Demo.runApp(firstTheme: args.count >= 2 ? Int(args[1]) ?? 0 : 0)
