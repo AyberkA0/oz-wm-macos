@@ -17,9 +17,12 @@ enum Log {
            let size = attrs[.size] as? NSNumber, size.uint64Value > maxSize {
             rotate()
         }
-        if !fm.fileExists(atPath: url.path) { fm.createFile(atPath: url.path, contents: nil) }
-        let h = try? FileHandle(forWritingTo: url)
-        h?.seekToEndOfFile()
+        // Appending: `OzWM msg`, `--check-config` and a second copy write to the same file,
+        // and each writing where it last was wrote over the others' lines.
+        let fd = Darwin.open(url.path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o644)
+        guard fd >= 0 else { return nil }
+        let h = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        h.seekToEndOfFile()
         return h
     }
 
@@ -31,7 +34,8 @@ enum Log {
 
     private static let formatter: DateFormatter = {
         let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss.SSS"
+        // With the date: Oz runs for weeks, and a line may be read long after.
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
         return f
     }()
 
@@ -48,6 +52,9 @@ enum Log {
             }
         }
     }
+
+    /// Waits until everything logged so far is written (before exiting).
+    static func flush() { queue.sync {} }
 
     static func debug(_ message: @autoclosure () -> String) {
         if debugEnabled { info("[debug] " + message()) }
