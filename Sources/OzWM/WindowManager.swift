@@ -3210,9 +3210,10 @@ final class WindowManager {
                 w.savedHeight = nil
             case .setHeight:
                 guard let ratio = number(arg), ratio > 0 else { return false }
+                // Up to 1 a share of the screen, above it points (no row is lower than 80).
                 s.rows[r].height = ratio <= 1
                     ? Strip.height(forRatio: ratio, viewportHeight: c.vh, gap: gap)
-                    : min(ratio, c.vh)
+                    : min(max(ratio, 80), c.vh).rounded()
             default:
                 if let saved = w.savedHeight {
                     s.rows[r].height = saved
