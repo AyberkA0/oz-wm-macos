@@ -6,8 +6,10 @@ final class HotkeyCenter {
     static let shared = HotkeyCenter()
 
     private struct Entry {
-        let code: UInt32
-        let mods: UInt32
+        /// As written ("ctrl+alt+ö"): which key that is depends on the keyboard layout.
+        let combo: String
+        var code: UInt32
+        var mods: UInt32
         var ref: EventHotKeyRef?
     }
 
@@ -22,6 +24,10 @@ final class HotkeyCenter {
     private func installHandler() {
         guard !installed else { return }
         installed = true
+        // Another keyboard layout: the keys named by what they type ("ö", "ğ") are elsewhere.
+        DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String), object: nil, queue: .main
+        ) { [weak self] _ in self?.layoutChanged() }
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         InstallEventHandler(GetApplicationEventTarget(), { _, event, _ in
             var hk = EventHotKeyID()
@@ -51,7 +57,7 @@ final class HotkeyCenter {
         guard let (code, mods) = HotkeyCenter.parse(combo) else { return nil }
         let id = nextID
         nextID += 1
-        var entry = Entry(code: code, mods: mods, ref: nil)
+        var entry = Entry(combo: combo, code: code, mods: mods, ref: nil)
         if !suspended {
             guard let ref = grab(id, code: code, mods: mods) else { return nil }
             entry.ref = ref
@@ -96,6 +102,22 @@ final class HotkeyCenter {
         guard suspended else { return }
         suspended = false
         for (id, e) in entries { entries[id]?.ref = grab(id, code: e.code, mods: e.mods) }
+    }
+
+    /// The keyboard layout changed: every combo is looked up again, and those now on another
+    /// key move there. One the new layout has no key for stays on the key it had.
+    private func layoutChanged() {
+        var moved = 0
+        for (id, e) in entries {
+            guard let (code, mods) = HotkeyCenter.parse(e.combo), code != e.code || mods != e.mods else { continue }
+            if let ref = e.ref { UnregisterEventHotKey(ref) }
+            entries[id]?.code = code
+            entries[id]?.mods = mods
+            entries[id]?.ref = suspended ? nil : grab(id, code: code, mods: mods)
+            if !suspended && entries[id]?.ref == nil { Log.info("shortcut \(e.combo): its key in the new layout is taken") }
+            moved += 1
+        }
+        if moved > 0 { Log.info("keyboard layout changed: \(moved) shortcut(s) moved to their new keys") }
     }
 
     /// Parses "ctrl+alt+shift+k", "cmd+option+left", "hyper+1".
