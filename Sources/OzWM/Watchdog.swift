@@ -55,18 +55,31 @@ enum Watchdog {
         defer { pcs.deallocate() }
         var n = 0
         guard thread_suspend(mainThread) == KERN_SUCCESS else { return [] }
+        #if arch(arm64)
         var state = arm_thread_state64_t()
-        var count = mach_msg_type_number_t(MemoryLayout<arm_thread_state64_t>.size / MemoryLayout<UInt32>.size)
+        let flavor = ARM_THREAD_STATE64
+        #else
+        var state = x86_thread_state64_t()
+        let flavor = x86_THREAD_STATE64
+        #endif
+        var count = mach_msg_type_number_t(MemoryLayout.size(ofValue: state) / MemoryLayout<UInt32>.size)
         let kr = withUnsafeMutablePointer(to: &state) {
             $0.withMemoryRebound(to: natural_t.self, capacity: Int(count)) {
-                thread_get_state(mainThread, ARM_THREAD_STATE64, $0, &count)
+                thread_get_state(mainThread, flavor, $0, &count)
             }
         }
         if kr == KERN_SUCCESS {
+            // Where it is, then (on ARM) where it returns to, which is not on the stack yet.
+            #if arch(arm64)
             pcs[0] = UInt(state.__pc)
             pcs[1] = UInt(state.__lr)
             n = 2
             var fp = UInt(state.__fp)
+            #else
+            pcs[0] = UInt(state.__rip)
+            n = 1
+            var fp = UInt(state.__rbp)
+            #endif
             for _ in 0..<64 where fp != 0 {
                 var frame: (UInt, UInt) = (0, 0)  // (previous fp, return address)
                 var size: vm_size_t = 0
@@ -85,8 +98,12 @@ enum Watchdog {
         var out: [String] = []
         for pc in UnsafeBufferPointer(start: pcs, count: n) {
             var info = Dl_info()
-            // Strip pointer authentication bits before looking the address up.
+            // Strip pointer authentication bits (ARM) before looking the address up.
+            #if arch(arm64)
             let addr = UnsafeRawPointer(bitPattern: pc & 0x0000_000F_FFFF_FFFF)
+            #else
+            let addr = UnsafeRawPointer(bitPattern: pc)
+            #endif
             guard let addr, dladdr(addr, &info) != 0 else { continue }
             let image = info.dli_fname.map { String(cString: $0) }.map { ($0 as NSString).lastPathComponent } ?? "?"
             let symbol = info.dli_sname.map { String(cString: $0) } ?? "?"
