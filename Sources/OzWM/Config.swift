@@ -261,7 +261,7 @@ final class ConfigEngine {
             __native.warn("oz.bind('" + combo + "'): could not bind these keys (not a key Oz knows, or taken)");
           }
         },
-        // Events: windowCreated, windowFocused, swipeEnded, spaceChanged, configLoaded
+        // Events: windowCreated, windowFocused, windowFloated, swipeEnded, spaceChanged, spaceTilingChanged, configLoaded
         on: function (event, fn) { (handlers[event] = handlers[event] || []).push(fn); },
         // oz.rule({ app: "Finder", float: true }), title/app/bundleId may be strings, RegExps, arrays or functions
         rule: function (r) { rules.push(r); },

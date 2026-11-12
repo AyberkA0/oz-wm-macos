@@ -179,7 +179,7 @@ oz.rule({ bundleId: "com.apple.ActivityMonitor", height: 1/3 });
 oz.rule({ app: "Terminal", height: 1/2 });
 
 // ───────────────────────────────────── Events ────────────────────────────────────
-// windowCreated, windowFocused, swipeEnded, spaceChanged, configLoaded
+// windowCreated, windowFocused, windowFloated, swipeEnded, spaceChanged, spaceTilingChanged, configLoaded
 // oz.on("windowCreated", function (w) { oz.log("new window:", w.app, w.title); });
 """#
 }
