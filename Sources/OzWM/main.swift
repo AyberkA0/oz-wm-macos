@@ -1,6 +1,7 @@
 import Cocoa
 
-let version = "0.3.2beta"
+/// The app's version, from its Info.plist ("dev" for a bare binary, which has none).
+let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
 
 let args = Array(CommandLine.arguments.dropFirst())
 switch args.first {
