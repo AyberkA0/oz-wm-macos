@@ -101,7 +101,8 @@ extension Strip {
 
     /// Rearranges this strip's windows like `state`: windows it matches go to their saved rows
     /// with their heights (at most `maxHeight`), widths and places; the rest keep their order,
-    /// after them. Scroll and focus come back too. Returns the windows that were matched.
+    /// after them. Scroll and focus come back too. Returns the windows that were matched; with
+    /// none, the strip is left as it is (the saved scroll belongs to windows that aren't here).
     @discardableResult
     public func restore(_ state: StripState, maxHeight: CGFloat,
                         match: (StripState.Window, Set<WinID>) -> WinID?) -> Set<WinID> {
@@ -125,6 +126,7 @@ extension Strip {
             let rest = row.windows.filter { !used.contains($0) }
             if !rest.isEmpty { newRows.append(Row(rest, height: row.height)) }
         }
+        guard !used.isEmpty else { return used }
         rows = newRows
         for id in used {
             widthWeights[id] = weights[id]

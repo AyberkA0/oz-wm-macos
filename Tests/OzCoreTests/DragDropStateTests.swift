@@ -101,6 +101,19 @@ final class DragDropStateTests: XCTestCase {
         XCTAssertEqual(s.scrollY, 200)
     }
 
+    func testRestoreWithNoWindowMatchedLeavesTheStripAlone() {
+        // Saved for windows that are gone (their apps restarted): its scroll isn't this strip's.
+        let saved = StripState(rows: [.init(height: 500, windows: [.init(id: 99)])], scroll: 2500, focused: 99)
+        let s = makeStrip([300, 300])
+        s.scrollY = 0
+        s.focused = 2
+        let used = s.restore(saved, maxHeight: 1000) { _, _ in nil }
+        XCTAssertTrue(used.isEmpty)
+        XCTAssertEqual(s.rows.map(\.windows), [[1], [2]])
+        XCTAssertEqual(s.scrollY, 0)
+        XCTAssertEqual(s.focused, 2)
+    }
+
     func testPresetMatchingFallsBackToTheAppsNextWindow() {
         let live = [WindowDescription(id: 50, app: "Google Chrome", bundleID: "com.google.Chrome", title: "New Tab"),
                     WindowDescription(id: 51, app: "Google Chrome", bundleID: "com.google.Chrome", title: "Docs"),
