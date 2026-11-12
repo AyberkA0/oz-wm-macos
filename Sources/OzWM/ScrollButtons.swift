@@ -100,6 +100,11 @@ final class ScrollButtons {
     var onDesktop: ((Int) -> Void)?
 
     private var tap: CFMachPort?
+    private var tapSource: CFRunLoopSource?
+    /// The kinds of event the tap watches now (0: no tap).
+    private var tapMask: CGEventMask = 0
+    /// The tap is to watch fewer kinds, once the buttons it took a press of are let go.
+    private var retuneWhenReleased = false
     private var listener: ((InputTrigger?) -> Void)?
     /// Presses taken, whose release must be taken too (or the app gets a lone mouse-up).
     private var heldMouse = Set<Int64>()
@@ -109,25 +114,75 @@ final class ScrollButtons {
     func set(up: InputTrigger?, down: InputTrigger?) {
         self.up = up
         self.down = down
-        if up != nil || down != nil { startTap() }
+        retune()
     }
 
     /// The next button pressed (taken, not passed on) goes to `done`; Esc gives nil.
     func listen(_ done: @escaping (InputTrigger?) -> Void) {
         listener = done
-        startTap()
+        retune()
     }
 
-    func stopListening() { listener = nil }
+    func stopListening() {
+        listener = nil
+        retune()
+    }
 
-    private func startTap() {
-        guard tap == nil else {
+    private static let mouseMask: CGEventMask = 1 << CGEventType.otherMouseDown.rawValue | 1 << CGEventType.otherMouseUp.rawValue
+    private static let keyMask: CGEventMask = 1 << CGEventType.keyDown.rawValue | 1 << CGEventType.keyUp.rawValue
+    private static let mediaMask: CGEventMask = 1 << 14  // NX_SYSDEFINED: media keys
+
+    /// The kinds of event the tap has to watch: those the picked buttons are, and every kind
+    /// while listening for one to pick. Every event of a watched kind goes through Oz before
+    /// its app gets it, so with a mouse button picked the keyboard is left alone.
+    private var wantedMask: CGEventMask {
+        if listener != nil { return Self.mouseMask | Self.keyMask | Self.mediaMask }
+        var mask: CGEventMask = 0
+        for t in [up, down] {
+            switch t?.kind {
+            case .mouse: mask |= Self.mouseMask
+            case .key: mask |= Self.keyMask
+            case .media: mask |= Self.mediaMask
+            case nil: break
+            }
+        }
+        return mask
+    }
+
+    /// Makes the tap watch what is wanted now: a new tap for other kinds, none for nothing.
+    private func retune() {
+        let mask = wantedMask
+        guard mask != tapMask else {
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             return
         }
-        let types: [CGEventType] = [.otherMouseDown, .otherMouseUp, .keyDown, .keyUp]
-        var mask = types.reduce(CGEventMask(0)) { $0 | (1 << $1.rawValue) }
-        mask |= 1 << 14  // NX_SYSDEFINED: media keys
+        // Fewer kinds, with a press taken whose release is still to come: that must be taken
+        // too, so wait for it. More kinds can't wait (a button is about to be picked).
+        let fewer = mask & ~tapMask == 0
+        if fewer && !(heldMouse.isEmpty && heldKeys.isEmpty && heldMedia.isEmpty) {
+            retuneWhenReleased = true
+            return
+        }
+        retuneWhenReleased = false
+        stopTap()
+        if mask != 0 { startTap(mask) }
+    }
+
+    private func stopTap() {
+        if let tapSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), tapSource, .commonModes) }
+        if let tap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            CFMachPortInvalidate(tap)
+        }
+        tap = nil
+        tapSource = nil
+        tapMask = 0
+        heldMouse.removeAll()
+        heldKeys.removeAll()
+        heldMedia.removeAll()
+    }
+
+    private func startTap(_ mask: CGEventMask) {
         let me = Unmanaged.passUnretained(self).toOpaque()
         guard let t = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
                                         eventsOfInterest: mask, callback: { _, type, event, info in
@@ -142,6 +197,9 @@ final class ScrollButtons {
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: t, enable: true)
         tap = t
+        tapSource = source
+        tapMask = mask
+        Log.debug("scroll buttons: watching\(mask & Self.mouseMask != 0 ? " mouse buttons" : "")\(mask & Self.keyMask != 0 ? " keys" : "")\(mask & Self.mediaMask != 0 ? " media keys" : "")")
     }
 
     /// The press or release `event` is, if it is one of the kinds a button can be (`down`: pressed).
@@ -176,7 +234,11 @@ final class ScrollButtons {
             DispatchQueue.main.async { done(cancel ? nil : t) }
             return nil
         }
-        if !down, release(t) { return nil }
+        if !down, release(t) {
+            // Not from inside the tap's own callback.
+            if retuneWhenReleased { DispatchQueue.main.async { [weak self] in self?.retune() } }
+            return nil
+        }
         // With the desktop key held: switch desktop. A key button counts with that key added.
         if down, let mod = desktopModifier, event.flags.contains(mod) {
             var bare = t
