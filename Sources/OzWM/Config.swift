@@ -7,7 +7,7 @@ import OzCore
 final class ConfigEngine {
     private let wm: WindowManager
     private var context: JSContext?
-    private var watcher: DispatchSourceFileSystemObject?
+    private var watchers: [DispatchSourceFileSystemObject] = []
     private var lastModified: Date?
     private(set) var lastError: String?
     /// What the config asks for that Oz can't do, though it loaded: settings it doesn't know,
@@ -33,6 +33,9 @@ final class ConfigEngine {
         }
         return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/oz/config.js")
     }
+
+    /// The file itself, when the config is a link to it.
+    static var resolvedURL: URL { configURL.resolvingSymlinksInPath() }
 
     func ensureConfigFile() {
         let url = ConfigEngine.configURL
@@ -157,27 +160,38 @@ final class ConfigEngine {
         return result
     }
 
-    /// Reload automatically when config.js is saved.
+    /// Reload automatically when config.js is saved, however it is saved and wherever it
+    /// really is: an editor that writes into the file changes only the file; one that swaps
+    /// in a new file changes its folder; and the file may be a link into another folder (a
+    /// dotfiles repository), which is where both of those happen then.
     func watch() {
-        let dir = ConfigEngine.configURL.deletingLastPathComponent()
-        let fd = open(dir.path, O_EVTONLY)
-        guard fd >= 0 else { return }
-        let src = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .rename, .delete],
-                                                            queue: .main)
-        src.setEventHandler { [weak self] in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                guard let self, let m = self.modificationDate(), m != self.lastModified else { return }
-                Log.info("config changed, reloading")
-                self.load()
+        watchers.forEach { $0.cancel() }
+        watchers = []
+        let link = ConfigEngine.configURL, file = ConfigEngine.resolvedURL
+        for path in Set([link.deletingLastPathComponent().path, file.deletingLastPathComponent().path, file.path]) {
+            let fd = open(path, O_EVTONLY)
+            guard fd >= 0 else { continue }
+            let src = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .extend, .rename, .delete],
+                                                                queue: .main)
+            src.setEventHandler { [weak self] in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self?.changed() }
             }
+            src.setCancelHandler { close(fd) }
+            src.resume()
+            watchers.append(src)
         }
-        src.setCancelHandler { close(fd) }
-        src.resume()
-        watcher = src
+    }
+
+    private func changed() {
+        // A new file may have taken the old one's place (or the link points elsewhere now).
+        watch()
+        guard let m = modificationDate(), m != lastModified else { return }
+        Log.info("config changed, reloading")
+        load()
     }
 
     private func modificationDate() -> Date? {
-        (try? FileManager.default.attributesOfItem(atPath: ConfigEngine.configURL.path))?[.modificationDate] as? Date
+        (try? FileManager.default.attributesOfItem(atPath: ConfigEngine.resolvedURL.path))?[.modificationDate] as? Date
     }
 
     private static func native(_ v: JSValue?) -> Any? {
