@@ -47,6 +47,26 @@ default:
     break
 }
 
+// One Oz at a time: two would each move the windows, against each other. The lock is on
+// the file for as long as this process lives, however it ends.
+let instanceLock: Int32 = {
+    let path = LayoutStore.url.deletingLastPathComponent().appendingPathComponent("oz.lock").path
+    let fd = open(path, O_CREAT | O_RDWR | O_CLOEXEC, 0o644)
+    // Can't tell: start anyway.
+    guard fd >= 0 else { return -1 }
+    // The one before may still be on its way out (a restart): give it a moment.
+    for _ in 0..<30 {
+        if flock(fd, LOCK_EX | LOCK_NB) == 0 { return fd }
+        usleep(100_000)
+    }
+    return -2
+}()
+if instanceLock == -2 {
+    Log.info("another Oz is already running: this one quits")
+    Log.flush()
+    exit(0)
+}
+
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
