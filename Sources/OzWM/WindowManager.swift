@@ -387,6 +387,7 @@ final class WindowManager {
         driver.pause()
         // Let queued moves land first, or they would undo the restore.
         writer.waitUntilIdle()
+        restoreEnhancedUI()
         var offset: CGFloat = 0
         for (key, strip) in strips {
             for (w, r) in restoreFrames(strip, key: key, offset: &offset) {
@@ -881,6 +882,7 @@ final class WindowManager {
             enabled = true
             // Back as it was when tiling was turned off.
             pendingRestore = LayoutStore.load()
+            for (pid, o) in observers { quietEnhancedUI(pid, app: o.app) }
             scanAll(initial: true)
         } else {
             saveLayout()
@@ -949,17 +951,32 @@ final class WindowManager {
     private func ensureObserver(_ pid: pid_t) {
         guard observers[pid] == nil,
               let o = AppObserver(pid: pid, schedule: { [writer] work in writer.perform(pid: pid, work) }) else { return }
-        // Chromium/Electron animate every AX move while this is on, which makes scrolling sluggish.
-        let app = o.app
-        writer.perform(pid: pid) {
-            if AX.bool(app, "AXEnhancedUserInterface") == true {
-                AX.set(app, "AXEnhancedUserInterface", kCFBooleanFalse)
-            }
-        }
+        quietEnhancedUI(pid, app: o.app)
         o.handler = { [weak self] name, element, pid in
             self?.handle(notification: name, element: element, pid: pid)
         }
         observers[pid] = o
+    }
+
+    /// Apps whose "enhanced user interface" Oz turned off, to turn it back on when it stops
+    /// tiling (quitting, or tiling switched off).
+    private var enhancedUI: [pid_t: AXUIElement] = [:]
+
+    /// Chromium/Electron animate every AX move while an app's `AXEnhancedUserInterface` is on
+    /// (an assistive app such as VoiceOver sets it), which makes scrolling sluggish: off while
+    /// Oz tiles, and remembered, to be put back by `restoreEnhancedUI`.
+    private func quietEnhancedUI(_ pid: pid_t, app: AXUIElement) {
+        writer.perform(pid: pid) { [weak self] in
+            guard AX.bool(app, "AXEnhancedUserInterface") == true else { return }
+            AX.set(app, "AXEnhancedUserInterface", kCFBooleanFalse)
+            DispatchQueue.main.async { self?.enhancedUI[pid] = app }
+        }
+    }
+
+    private func restoreEnhancedUI() {
+        for (_, app) in enhancedUI { AX.set(app, "AXEnhancedUserInterface", kCFBooleanTrue) }
+        if !enhancedUI.isEmpty { Log.info("enhanced user interface back on for \(enhancedUI.count) app(s)") }
+        enhancedUI.removeAll()
     }
 
     /// Finds all windows. At startup this blocks (nothing to keep smooth yet); on later
@@ -1307,6 +1324,7 @@ final class WindowManager {
 
     private func appTerminated(_ pid: pid_t) {
         observers.removeValue(forKey: pid)
+        enhancedUI.removeValue(forKey: pid)
         writer.forget(pid: pid)
         for w in windows.values where w.pid == pid { unmanage(w.id, focusNeighbor: false) }
         for w in floating.values where w.pid == pid { forgetFloating(w.id) }
