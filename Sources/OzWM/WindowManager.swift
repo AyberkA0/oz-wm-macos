@@ -1048,7 +1048,10 @@ final class WindowManager {
             let probes = WindowProbe.readApp(pid)
             DispatchQueue.main.async {
                 guard let self else { return }
-                probes.forEach { self.add($0, mode: mode) }
+                // Those coming back to a place they had, from the top down: each finds the
+                // rows above it already there.
+                let row = { (p: WindowProbe) in self.state[p.id].tiledPlace?.place.row ?? .max }
+                probes.sorted { row($0) < row($1) }.forEach { self.add($0, mode: mode) }
                 if mode == .scan { self.layoutVisible(animated: false) }
             }
         }
@@ -1137,8 +1140,13 @@ final class WindowManager {
         }
 
         windows[wid] = w
-        let position: InsertPosition = mode == .scan ? .end : settings.newWindowPosition
-        strip.insert(wid, height: height, anchor: strip.focused, position: position)
+        if let back = state[wid].take(\.tiledPlace), back.key == key {
+            // Back from the Dock, or its app shown again: to the place it had.
+            strip.insert(wid, at: back.place, maxHeight: vh)
+        } else {
+            let position: InsertPosition = mode == .scan ? .end : settings.newWindowPosition
+            strip.insert(wid, height: height, anchor: strip.focused, position: position)
+        }
         Log.debug("add \(wid) \(w.appName) '\(w.title)' -> space \(space) rows=\(strip.rows.count)")
 
         if mode == .created || strip.focused == nil {
@@ -1234,7 +1242,7 @@ final class WindowManager {
             if let w = find(element, pid: pid, askApp: false) { unmanage(w.id, focusNeighbor: true) }
         case kAXWindowMiniaturizedNotification:
             guard let w = find(element, pid: pid, askApp: false) else { return }
-            if floating[w.id] != nil { rememberMinimized(w.id) }
+            if floating[w.id] != nil { rememberMinimized(w.id) } else { rememberTiledPlace(w.id) }
             unmanage(w.id, focusNeighbor: true)
         case kAXWindowMovedNotification, kAXWindowResizedNotification:
             // While scrolling these are our own moves, dozens per second: skip the lookup.
@@ -1290,7 +1298,10 @@ final class WindowManager {
             }
             scheduleFrameCheck(w)
         case kAXApplicationHiddenNotification:
-            for w in windows.values where w.pid == pid { unmanage(w.id, focusNeighbor: false) }
+            // Every place noted first, from the strip as it is with all of them in it.
+            let hidden = windows.values.filter { $0.pid == pid }
+            hidden.forEach { rememberTiledPlace($0.id) }
+            hidden.forEach { unmanage($0.id, focusNeighbor: false) }
         case kAXApplicationShownNotification:
             DispatchQueue.main.asyncAfter(deadline: .now() + Timing.shownScan) { [weak self] in
                 self?.scanApp(pid, mode: .scan)
@@ -1677,6 +1688,12 @@ final class WindowManager {
     }
 
     // MARK: Dragging in and out of the scroll area
+
+    /// A tiled window is about to leave its strip for a while (minimized, its app hidden).
+    private func rememberTiledPlace(_ id: CGWindowID) {
+        guard windows[id] != nil, let (key, strip) = locate(id), let place = strip.place(of: id) else { return }
+        state[id].tiledPlace = .init(key: key, place: place)
+    }
 
     private func rememberMinimized(_ id: CGWindowID) {
         state[id].minimized = .init(manual: state[id].manualFloat, kept: state[id].keptFloating, dock: dockPlace(id))

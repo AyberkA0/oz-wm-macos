@@ -126,6 +126,7 @@ When Oz opens Mission Control or App Exposé (double tap, `⌃⌥ m`, `⌃⌥⇧
 - **Moving up and down** (`⌃⌥⇧ ↑/↓`). If the adjacent row contains a single narrowed window and the moving window fits beside it, the window joins that row on the side it is already on; pressing again continues past it into a row of its own. Otherwise the rows swap.
 - **Keyboard widths** in a single-window row: `cycleWidth` (`⌃⌥ w`) cycles 1/3 → 1/2 → 2/3 → full, `resizeWidth` (`⌃⌥ ,` / `⌃⌥ .`) adjusts in steps, `equalizeRow` (`⌃⌥ =`) restores full width.
 - While you resize a window, its neighbours adjust live.
+- **Minimized and hidden windows.** A window sent to the Dock, or hidden with its app (⌘H), comes back to the place it had: its row and height, beside the windows it shared a row with.
 - Keyboard rearrangements (moves, joins, width and height changes, floating) are animated over `animationDuration`, including rows entering and leaving the view.
 
 ### Full screen, undo and saved layouts

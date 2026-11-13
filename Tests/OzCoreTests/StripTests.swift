@@ -215,6 +215,47 @@ final class StripTests: XCTestCase {
         }
     }
 
+    func testWindowComesBackToItsPlace() {
+        // [1] [2 | 3 | 4] [5]: 3 goes away from the middle of its row and comes back there,
+        // with its share of the row.
+        let s = makeStrip([300, 400])
+        s.insertBeside(3, anchor: 2, right: true)
+        s.insertBeside(4, anchor: 3, right: true)
+        s.insert(5, height: 500, anchor: nil, position: .end)
+        XCTAssertEqual(s.rows.map(\.windows), [[1], [2, 3, 4], [5]])
+        s.setWidthFraction(3, 0.5)
+        let weight = s.weight(3)
+        var place = s.place(of: 3)!
+        s.remove(3)
+        s.insert(3, at: place, maxHeight: vh)
+        XCTAssertEqual(s.rows.map(\.windows), [[1], [2, 3, 4], [5]])
+        XCTAssertEqual(s.weight(3), weight)
+        // Its left neighbour gone meanwhile: left of the one that was on its right.
+        place = s.place(of: 3)!
+        s.remove(3); s.remove(2)
+        s.insert(3, at: place, maxHeight: vh)
+        XCTAssertEqual(s.rows.map(\.windows), [[1], [3, 4], [5]])
+
+        // A row of its own: back between the same rows, with its height, though rows were
+        // added above meanwhile (the row number alone would be off by one).
+        let t = makeStrip([300, 400, 500])
+        t.setLoneWidth(2, 0.5)
+        t.setLoneOffset(2, 0.25)
+        place = t.place(of: 2)!
+        t.remove(2)
+        t.insert(9, height: 200, anchor: nil, position: .start)
+        t.insert(2, at: place, maxHeight: 350)
+        XCTAssertEqual(t.rows.map(\.windows), [[9], [1], [2], [3]])
+        XCTAssertEqual(t.rows[2].height, 350)
+        XCTAssertEqual(t.weight(2), 0.5)
+        XCTAssertEqual(t.widthOffsets[2], 0.25)
+        // Neither neighbour left: at the row number it had.
+        place = t.place(of: 2)!
+        t.remove(2); t.remove(1); t.remove(3)
+        t.insert(2, at: place, maxHeight: vh)
+        XCTAssertEqual(t.rows.map(\.windows), [[9], [2]])
+    }
+
     func testMoveAndNeighbors() {
         let s = makeStrip([300, 300, 300])
         XCTAssertTrue(s.moveVertical(1, by: 1))

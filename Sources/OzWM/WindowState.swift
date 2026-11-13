@@ -1,4 +1,5 @@
 import Cocoa
+import OzCore
 
 /// Everything Oz notes about one window, by its id, apart from `ManagedWindow` (which is made
 /// anew each time the window is picked up). Nothing noted is the default; `WindowStates`
@@ -33,6 +34,15 @@ struct WindowState: Equatable {
     /// When Oz last put it back to the size it gave it (see `compareFrame`): an app that
     /// insists on its own width isn't fought over and over.
     var sizeEnforcedAt: CFTimeInterval?
+
+    /// Tiled, then minimized or hidden with its app: where it was in its strip, to go back
+    /// there (not to a new row at the end) when it returns.
+    var tiledPlace: TiledPlace?
+
+    struct TiledPlace: Equatable {
+        let key: StripKey
+        let place: RowPlace
+    }
 
     // MARK: Floating
 

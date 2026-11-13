@@ -57,6 +57,19 @@ public struct LayoutItem {
     public let frame: CGRect
 }
 
+/// A window's place in a strip (see `Strip.place(of:)`): its row, the windows it shared the
+/// row with on either side, and the first windows of the rows above and below.
+public struct RowPlace: Equatable {
+    public let row: Int
+    public let height: CGFloat
+    public let left: [WinID]
+    public let right: [WinID]
+    public let above: WinID?
+    public let below: WinID?
+    public let weight: CGFloat?
+    public let offset: CGFloat?
+}
+
 public enum InsertPosition: String, CaseIterable {
     case below, above, end, start
 }
@@ -177,6 +190,50 @@ public final class Strip {
         rows[r].windows.insert(id, at: right ? c + 1 : c)
         widthWeights[id] = nil
         return true
+    }
+
+    /// Where a window is, for putting it back there once it has been away (minimized, its app
+    /// hidden) and the strip may have changed meanwhile: `nil` if it isn't in the strip.
+    public func place(of id: WinID) -> RowPlace? {
+        guard let (r, c) = locate(id) else { return nil }
+        let row = rows[r]
+        return RowPlace(row: r, height: row.height, left: Array(row.windows[..<c]), right: Array(row.windows[(c + 1)...]),
+                        above: r > 0 ? rows[r - 1].windows.first : nil,
+                        below: r + 1 < rows.count ? rows[r + 1].windows.first : nil,
+                        weight: widthWeights[id], offset: widthOffsets[id])
+    }
+
+    /// Puts a window (not in the strip) back where `place` says, as well as the strip still
+    /// allows. It shared its row: beside those of that row still together (right of the nearest
+    /// that was on its left, else left of the nearest on its right), with its share. Otherwise
+    /// a row of its own, at most `maxHeight` high: above the row that was below it, else below
+    /// the one that was above it, else at the row number it had.
+    public func insert(_ id: WinID, at place: RowPlace, maxHeight: CGFloat) {
+        guard !contains(id) else { return }
+        if let anchor = place.left.last(where: contains), let (r, c) = locate(anchor) {
+            rows[r].windows.insert(id, at: c + 1)
+            widthWeights[id] = place.weight
+            return
+        }
+        if let anchor = place.right.first(where: contains), let (r, c) = locate(anchor) {
+            rows[r].windows.insert(id, at: c)
+            widthWeights[id] = place.weight
+            return
+        }
+        let index: Int
+        if let b = place.below, let (r, _) = locate(b) {
+            index = r
+        } else if let a = place.above, let (r, _) = locate(a) {
+            index = r + 1
+        } else {
+            index = min(place.row, rows.count)
+        }
+        rows.insert(Row([id], height: min(place.height, maxHeight)), at: index)
+        // Narrowed, alone in its row: as wide as it was, where it was.
+        if place.left.isEmpty && place.right.isEmpty {
+            widthWeights[id] = place.weight
+            widthOffsets[id] = place.offset
+        }
     }
 
     /// Removes a window; returns the neighbour that should receive focus.
