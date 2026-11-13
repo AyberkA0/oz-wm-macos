@@ -1,4 +1,5 @@
 import Foundation
+import IOKit
 import OzCore
 
 // Raw trackpad access through the private MultitouchSupport framework (same
@@ -58,6 +59,45 @@ final class TouchSource {
         unregister = sym("MTUnregisterContactFrameCallback", MTRegisterFn.self)
         startDevice = sym("MTDeviceStart", MTDeviceStartFn.self)
         stopDevice = sym("MTDeviceStop", MTDeviceStopFn.self)
+    }
+
+    /// Main thread: a trackpad was connected or went away (a Magic Trackpad over Bluetooth,
+    /// say). The devices are listed only when listening starts, so it has to start again.
+    var onDevicesChanged: (() -> Void)?
+    private var notifyPort: IONotificationPortRef?
+    private var deviceIterators: [io_iterator_t] = []
+    private var changeWork: DispatchWorkItem?
+
+    /// Has IOKit say when a multitouch device appears or goes; `onDevicesChanged` follows a
+    /// second later (a device shows up in pieces, and is ready a moment after the first).
+    func watchDevices() {
+        guard notifyPort == nil, let port = IONotificationPortCreate(kIOMainPortDefault) else { return }
+        notifyPort = port
+        CFRunLoopAddSource(CFRunLoopGetMain(), IONotificationPortGetRunLoopSource(port).takeUnretainedValue(), .commonModes)
+        let callback: IOServiceMatchingCallback = { _, iterator in
+            // The iterator has to be emptied for the next notification to come.
+            var count = 0
+            while case let service = IOIteratorNext(iterator), service != 0 {
+                IOObjectRelease(service)
+                count += 1
+            }
+            if count > 0 { TouchSource.shared.devicesChanged() }
+        }
+        for kind in [kIOFirstMatchNotification, kIOTerminatedNotification] {
+            var iterator: io_iterator_t = 0
+            guard IOServiceAddMatchingNotification(port, kind, IOServiceMatching("AppleMultitouchDevice"),
+                                                   callback, nil, &iterator) == KERN_SUCCESS else { continue }
+            // Emptied once to arm it: the devices already there are no news.
+            while case let service = IOIteratorNext(iterator), service != 0 { IOObjectRelease(service) }
+            deviceIterators.append(iterator)
+        }
+    }
+
+    private func devicesChanged() {
+        changeWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.onDevicesChanged?() }
+        changeWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
     }
 
     var isAvailable: Bool { createList != nil && register != nil && startDevice != nil }

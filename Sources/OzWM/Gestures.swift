@@ -37,10 +37,15 @@ final class GestureController {
         return ok
     }
 
+    /// Main thread. A swipe under way ends here (its recognizer goes): the strip must hear
+    /// of it, or it would wait for those fingers to lift for ever.
     func restart() {
         lock.lock()
+        let swiping = recognizers.values.contains { $0.isSwiping }
         recognizers.removeAll()
+        pendingDY = 0
         lock.unlock()
+        if swiping { handler?(.swipeEnded(velocity: 0)) }
         TouchSource.shared.start()
     }
 

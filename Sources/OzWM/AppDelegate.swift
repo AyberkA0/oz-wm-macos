@@ -106,6 +106,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         gestures.start()
+        TouchSource.shared.onDevicesChanged = { [weak self] in
+            self?.gestures.restart()
+            Log.info("trackpads connected or removed: listening to \(TouchSource.shared.deviceCount) device(s)")
+        }
+        TouchSource.shared.watchDevices()
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification,
                                                           object: nil, queue: .main) { [weak self] _ in
             self?.updatePassThrough()
