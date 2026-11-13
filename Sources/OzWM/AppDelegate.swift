@@ -42,7 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             wm.saveLayout()
             wm.restoreAll()
         }
-        restoreWallpaperTinting()
+        Self.restoreWallpaperTinting()
     }
 
     // MARK: Startup
@@ -232,19 +232,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private static let tintKey = "AppleReduceDesktopTinting" as CFString
     private static let savedTintKey = "tintingWasOnBeforeOz"
 
-    private var wallpaperTintingOn: Bool {
+    private static var wallpaperTintingOn: Bool {
         CFPreferencesAppSynchronize(kCFPreferencesAnyApplication)
         return !(CFPreferencesCopyAppValue(AppDelegate.tintKey, kCFPreferencesAnyApplication) as? Bool ?? false)
     }
 
-    private func disableWallpaperTinting() {
+    private static func disableWallpaperTinting() {
         guard wallpaperTintingOn else { return }
         UserDefaults.standard.set(true, forKey: AppDelegate.savedTintKey)
         SystemActions.run("/usr/bin/defaults", ["write", "-g", "AppleReduceDesktopTinting", "-bool", "true"])
         Log.info("macOS wallpaper tinting turned off (restored when Oz quits)")
     }
 
-    private func restoreWallpaperTinting() {
+    /// Also what the rescue after two crashes calls (see `CrashRecovery`).
+    static func restoreWallpaperTinting() {
         guard UserDefaults.standard.bool(forKey: AppDelegate.savedTintKey) else { return }
         UserDefaults.standard.removeObject(forKey: AppDelegate.savedTintKey)
         // Synchronous: this runs while quitting.
@@ -283,6 +284,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             let count = wm.allWindowsInfo().count
             item("Oz WM — \(count) window\(count == 1 ? "" : "s")", nil).isEnabled = false
+            if CrashRecovery.startedAfterCrash {
+                item("⚠︎ Oz started again after it crashed (see the log)", #selector(openLog))
+            }
             if let err = config.lastError {
                 item("⚠︎ Config error: \(err)", nil).isEnabled = false
             }
@@ -343,7 +347,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         gestures.configure(s)
         if started { wm.settingsChanged(); updatePassThrough() }
         updateDemo(s.demoMode)
-        if s.disableWallpaperTinting { disableWallpaperTinting() } else { restoreWallpaperTinting() }
+        if s.disableWallpaperTinting { Self.disableWallpaperTinting() } else { Self.restoreWallpaperTinting() }
         scrollButtons.desktopModifier = [
             "shift": CGEventFlags.maskShift, "control": .maskControl, "option": .maskAlternate, "command": .maskCommand,
         ][s.desktopModifier]

@@ -99,7 +99,7 @@ make stop       # quit the running Oz
 
 > **Building from source:** with an ad-hoc signature, every build changes the code signature and macOS revokes the Accessibility permission. Run `./scripts/create-signing-cert.sh` once to add a self-signed "Oz Local Signing" identity to your login keychain; `make app` then uses it and permissions persist across rebuilds (`SIGN_ID=...` selects another identity).
 
-The menu bar icon provides: tiling on/off (globally or for the current desktop), live capture, smooth scrolling, the scroll area, floating or tiling the focused window (*Float Focused Window* / *Tile Focused Window*, like `toggleFloat`), Settings, retile, editing and reloading the configuration file, the log, trackpad setup, and quit. When Oz quits, it returns every window it had moved off screen.
+The menu bar icon provides: tiling on/off (globally or for the current desktop), live capture, smooth scrolling, the scroll area, floating or tiling the focused window (*Float Focused Window* / *Tile Focused Window*, like `toggleFloat`), Settings, retile, editing and reloading the configuration file, the log, trackpad setup, and quit. When Oz quits, it returns every window it had moved off screen. If Oz crashes, it starts again by itself and carries on with the same layout; if it crashes a second time within a minute, it instead puts every window back on screen, tells you, and stays closed. (After a forced quit nothing can do that: open Oz again and the windows come back.)
 
 <p align="center"><img src="docs/media/road.svg" alt="" width="100%"></p>
 

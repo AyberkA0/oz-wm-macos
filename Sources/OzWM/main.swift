@@ -59,6 +59,9 @@ case "--check-config":
     if !engine.warnings.isEmpty { exit(1) }
     print("OK")
     exit(0)
+case CrashRecovery.rescueFlag:
+    // Started by an Oz that crashed for the second time in a row.
+    CrashRecovery.runRescue()
 case "--version":
     print("Oz WM \(version)")
     exit(0)
@@ -73,8 +76,9 @@ let instanceLock: Int32 = {
     let fd = open(path, O_CREAT | O_RDWR | O_CLOEXEC, 0o644)
     // Can't tell: start anyway.
     guard fd >= 0 else { return -1 }
-    // The one before may still be on its way out (a restart): give it a moment.
-    for _ in 0..<30 {
+    // The one before may still be on its way out (a restart): give it a moment. One that
+    // crashed takes longer to go (macOS writes its crash report first).
+    for _ in 0..<(args.contains(CrashRecovery.afterCrashFlag) ? 300 : 30) {
         if flock(fd, LOCK_EX | LOCK_NB) == 0 { return fd }
         usleep(100_000)
     }
@@ -85,6 +89,9 @@ if instanceLock == -2 {
     Log.flush()
     exit(0)
 }
+
+CrashRecovery.install(afterCrash: args.contains(CrashRecovery.afterCrashFlag))
+if CrashRecovery.startedAfterCrash { Log.info("the Oz before this one crashed: started again in its place") }
 
 let app = NSApplication.shared
 let delegate = AppDelegate()
