@@ -236,6 +236,19 @@ public final class Strip {
         }
     }
 
+    /// Puts `new` in `old`'s place: its row, its width and place in the row, the focus if it
+    /// had it. For a window that goes on under another id, as when another tab of it comes
+    /// forward (each tab is a window of its own to macOS).
+    @discardableResult
+    public func replace(_ old: WinID, with new: WinID) -> Bool {
+        guard old != new, !contains(new), let (r, c) = locate(old) else { return false }
+        rows[r].windows[c] = new
+        widthWeights[new] = widthWeights.removeValue(forKey: old)
+        widthOffsets[new] = widthOffsets.removeValue(forKey: old)
+        if focused == old { focused = new }
+        return true
+    }
+
     /// Removes a window; returns the neighbour that should receive focus.
     @discardableResult
     public func remove(_ id: WinID) -> WinID? {

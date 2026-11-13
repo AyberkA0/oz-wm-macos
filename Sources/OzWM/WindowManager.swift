@@ -124,6 +124,14 @@ final class WindowManager {
     /// What Oz notes about each window (see `WindowState`).
     private var state = WindowStates()
     private var observers: [pid_t: AppObserver] = [:]
+    /// Tabs that aren't the one showing in their window. To macOS every tab is a window of
+    /// its own, of which only the one in front is anywhere on screen: the strip holds that
+    /// one, and the others wait here until they come forward and take its place (see
+    /// `takeOver`). Without this each tab opened got a row, and the rows stayed, empty.
+    private var backgroundTabs: [CGWindowID: ManagedWindow] = [:]
+    /// Windows that just closed while their app has tabs behind: one of those may be coming
+    /// forward in its place.
+    private var closing = Set<CGWindowID>()
     let snapshots = SnapshotCache()
     private let overlays = OverlayManager()
 
@@ -510,6 +518,15 @@ final class WindowManager {
             if !s.proxied { s.proxyShownAt = nil }
         }
         for key in Array(docks.keys) where docks[key]?.isEmpty ?? true { docks.removeValue(forKey: key) }
+        // Windows that were away (minimized, hidden) and closed there never come back.
+        // A tab that came forward with no word from its app is found here at the latest.
+        putAwayTabs(pid: nil)
+        let away = state.ids { $0.tiledPlace != nil || $0.minimized != nil }
+        if !away.isEmpty || !backgroundTabs.isEmpty {
+            let all = WindowServer.allIDs()
+            state.update(away.filter { !all.contains($0) }) { $0.tiledPlace = nil; $0.minimized = nil }
+            for id in Array(backgroundTabs.keys) where !all.contains(id) { backgroundTabs.removeValue(forKey: id) }
+        }
     }
 
     // MARK: Presets
@@ -891,6 +908,8 @@ final class WindowManager {
             strips.removeAll()
             windows.removeAll()
             floating.removeAll()
+            backgroundTabs.removeAll()
+            closing.removeAll()
             state.updateAll { _, s in
                 s.minHeight = nil
                 s.manualFloat = false
@@ -1024,6 +1043,7 @@ final class WindowManager {
             }
         }
 
+        putAwayTabs(pid: nil)
         if initial, let fid = systemFocusedWindowID() {
             if let (_, strip) = locate(fid) { strip.focused = fid }
         }
@@ -1066,7 +1086,7 @@ final class WindowManager {
         }
     }
 
-    private func add(_ probe: WindowProbe, mode: AddMode) {
+    private func add(_ probe: WindowProbe, mode: AddMode, tabChecked: Bool = false) {
         let wid = probe.id, pid = probe.pid, el = probe.element
         guard enabled, pid != getpid(), windows[wid] == nil, floating[wid] == nil, probe.manageable else { return }
         let app = NSRunningApplication(processIdentifier: pid)
@@ -1077,6 +1097,21 @@ final class WindowManager {
         if rule.ignore { return }
         ensureObserver(pid)
         observers[pid]?.watch(window: el)
+
+        // Another tab of a window Oz has: it takes that one's place, it isn't a new window.
+        if let tab = tabSibling(of: probe) {
+            if tab.behind {
+                takeOver(tab.window, by: w)
+                return
+            }
+            if mode == .created && !tabChecked {
+                DispatchQueue.main.asyncAfter(deadline: .now() + Timing.tabJoin) { [weak self] in
+                    self?.add(probe, mode: mode, tabChecked: true)
+                }
+                return
+            }
+        }
+        backgroundTabs.removeValue(forKey: wid)
 
         // Blender's other windows (preferences, render, editors) look just like its main one;
         // only the main one has "Blender" in its title.
@@ -1178,6 +1213,134 @@ final class WindowManager {
         schedulePresetApply(key)
     }
 
+    // MARK: Tabs
+
+    /// macOS keeps this window but shows it nowhere, on no desktop: a tab behind the one
+    /// showing in its window. (A window Oz moved out of view is still on its desktop.)
+    private func isBehindAnotherTab(_ id: CGWindowID) -> Bool {
+        Spaces.space(of: id) == nil && WindowServer.window(id) != nil
+    }
+
+    /// The window of the same app that the window just found is a tab of, if any. `behind`:
+    /// that one has gone behind it already (or has just closed), so this one takes its place;
+    /// otherwise it only sits exactly where this one was born, which a tab does a moment
+    /// before the other goes behind it.
+    private func tabSibling(of probe: WindowProbe) -> (window: ManagedWindow, behind: Bool)? {
+        let same = (Array(windows.values) + Array(floating.values)).filter { $0.pid == probe.pid && $0.id != probe.id }
+        guard !same.isEmpty else { return nil }
+        func distance(_ w: ManagedWindow) -> CGFloat {
+            guard let a = w.lastFrame, let b = probe.frame else { return .greatestFiniteMagnitude }
+            return abs(a.minX - b.minX) + abs(a.minY - b.minY) + abs(a.width - b.width) + abs(a.height - b.height)
+        }
+        let behind = same.filter { closing.contains($0.id) || isBehindAnotherTab($0.id) }
+        if let w = behind.min(by: { distance($0) < distance($1) }) { return (w, true) }
+        guard let f = probe.frame,
+              let w = same.first(where: { !$0.parked && ($0.lastFrame?.approxEqual(f, tolerance: 2) ?? false) }) else { return nil }
+        return (w, false)
+    }
+
+    /// Another tab of `old`'s window came forward as `new`: it is the same window to the
+    /// user, so `new` gets everything `old` had (its row and width, or its region or floating
+    /// place) and nothing moves. `old` waits among the tabs behind, unless it closed.
+    private func takeOver(_ old: ManagedWindow, by new: ManagedWindow) {
+        let id = old.id
+        old.frameCheck?.cancel()
+        backgroundTabs.removeValue(forKey: new.id)
+        if windows[id] != nil, let (key, strip) = locate(id) {
+            strip.replace(id, with: new.id)
+            strip.focused = new.id
+            windows.removeValue(forKey: id)
+            windows[new.id] = new
+            if maximized[key] == id { maximized[key] = new.id }
+            if maximizeSliding[key] == id { maximizeSliding[key] = new.id }
+            if pendingActivation[key] == id { pendingActivation[key] = new.id }
+            let minHeight = state[id].minHeight
+            // Where the other tab was, if that was in its place: nothing to move then.
+            new.lastFrame = old.parked || old.shrunk ? nil : old.lastFrame
+            new.savedHeight = old.savedHeight
+            forgetStripState(id)
+            snapshots.remove(id)
+            state[new.id].minHeight = minHeight
+            relayout(key, animated: false)
+        } else if floating[id] != nil {
+            floating.removeValue(forKey: id)
+            floating[new.id] = new
+            for (key, regions) in docks {
+                for (i, ids) in regions where ids.contains(id) { docks[key]?[i] = ids.map { $0 == id ? new.id : $0 } }
+            }
+            let s = state[id]
+            state[new.id].manualFloat = s.manualFloat
+            state[new.id].keptFloating = s.keptFloating
+            state[new.id].dockShare = s.dockShare
+            state[new.id].zoom = s.zoom
+            state[id].manualFloat = false
+            state[id].keptFloating = false
+            state[id].dockShare = nil
+            state[id].zoom = nil
+            new.lastFrame = old.lastFrame
+            new.zoomedFrame = old.zoomedFrame
+        }
+        if trackedFocus == id { trackedFocus = new.id }
+        old.parked = false
+        old.shrunk = false
+        let closed = closing.remove(id) != nil
+        if !closed { backgroundTabs[id] = old }
+        Log.info("\(new.appName): tab \(new.id) is in front, in the place of \(id)\(closed ? " (closed)" : "")")
+    }
+
+    /// A window closed. With tabs behind it one of them comes forward in its place (now, or
+    /// in a moment: until then its place is kept); otherwise it is gone.
+    private func windowClosed(_ w: ManagedWindow) {
+        guard backgroundTabs.values.contains(where: { $0.pid == w.pid }) else {
+            return unmanage(w.id, focusNeighbor: true)
+        }
+        closing.insert(w.id)
+        if bringTabForward(inPlaceOf: w) { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Timing.tabForward) { [weak self] in
+            // Not if a tab took its place meanwhile (seen when it got the focus).
+            guard let self, self.closing.contains(w.id) else { return }
+            if !self.bringTabForward(inPlaceOf: w) {
+                self.closing.remove(w.id)
+                self.unmanage(w.id, focusNeighbor: true)
+            }
+        }
+    }
+
+    /// One of the app's tabs that were behind is showing now: it takes the closed window's place.
+    private func bringTabForward(inPlaceOf old: ManagedWindow) -> Bool {
+        guard let tab = backgroundTabs.values.first(where: { $0.pid == old.pid && Spaces.space(of: $0.id) != nil }) else { return false }
+        takeOver(old, by: tab)
+        return true
+    }
+
+    /// Windows of `pid` (nil: of every app) that went behind another tab without a word (two
+    /// windows merged into one, a tab that came forward unseen) leave their row or region
+    /// and wait among the tabs behind.
+    /// First the app is asked for its windows: the tab now in front, if Oz doesn't have it
+    /// (it came forward unseen), takes the place of the one behind instead.
+    private func putAwayTabs(pid: pid_t?) {
+        guard enabled else { return }
+        func behind(_ pid: pid_t?) -> [ManagedWindow] {
+            (Array(windows.values) + Array(floating.values)).filter {
+                (pid == nil || $0.pid == pid) && !closing.contains($0.id) && isBehindAnotherTab($0.id)
+            }
+        }
+        for pid in Set(behind(pid).map(\.pid)) {
+            writer.perform(pid: pid) { [weak self] in
+                let probes = WindowProbe.readApp(pid)
+                DispatchQueue.main.async {
+                    guard let self, self.enabled else { return }
+                    probes.forEach { self.add($0, mode: .created, tabChecked: true) }
+                    for w in behind(pid) {
+                        Log.info("\(w.appName): window \(w.id) is a tab behind another now; out of its place")
+                        self.unmanage(w.id, focusNeighbor: false)
+                        self.backgroundTabs[w.id] = w
+                    }
+                }
+            }
+        }
+    }
+
     private func unmanage(_ id: CGWindowID, focusNeighbor: Bool) {
         forgetStripState(id)
         snapshots.remove(id)
@@ -1236,10 +1399,18 @@ final class WindowManager {
             addWindow(element, pid: pid, mode: .created)
         case kAXFocusedWindowChangedNotification:
             focusChanged(element)
+        case kAXMainWindowChangedNotification:
+            // Another tab picked in a window of an app that isn't in front changes no focus,
+            // only this: a window Oz doesn't have is that tab, to take the other's place.
+            if find(element, pid: pid, askApp: false) == nil { addWindow(element, pid: pid, mode: .created) }
         // Known by element: asking the app about a window that's gone waits out the AX timeout
         // (a 250 ms stall), and an unknown one isn't ours anyway.
         case kAXUIElementDestroyedNotification:
-            if let w = find(element, pid: pid, askApp: false) { unmanage(w.id, focusNeighbor: true) }
+            if let id = backgroundTabs.first(where: { $0.value.pid == pid && CFEqual($0.value.element, element) })?.key {
+                backgroundTabs.removeValue(forKey: id)
+            } else if let w = find(element, pid: pid, askApp: false) {
+                windowClosed(w)
+            }
         case kAXWindowMiniaturizedNotification:
             guard let w = find(element, pid: pid, askApp: false) else { return }
             if floating[w.id] != nil { rememberMinimized(w.id) } else { rememberTiledPlace(w.id) }
@@ -1336,6 +1507,7 @@ final class WindowManager {
     private func appTerminated(_ pid: pid_t) {
         observers.removeValue(forKey: pid)
         enhancedUI.removeValue(forKey: pid)
+        for (id, w) in backgroundTabs where w.pid == pid { backgroundTabs.removeValue(forKey: id) }
         writer.forget(pid: pid)
         for w in windows.values where w.pid == pid { unmanage(w.id, focusNeighbor: false) }
         for w in floating.values where w.pid == pid { forgetFloating(w.id) }
@@ -1354,6 +1526,7 @@ final class WindowManager {
             writer.forget(pid: pid)
             for w in windows.values where w.pid == pid { unmanage(w.id, focusNeighbor: false) }
             for w in floating.values where w.pid == pid { forgetFloating(w.id) }
+            for (id, w) in backgroundTabs where w.pid == pid { backgroundTabs.removeValue(forKey: id) }
         }
     }
 
@@ -1386,9 +1559,13 @@ final class WindowManager {
         let refocus = CACurrentMediaTime() - unlockedAt < Timing.refocusAfterUnlock
         guard let w = find(el, pid: pid, askApp: false) else {
             if !refocus { restoreMaximized(focusing: el, pid: pid) }
+            // A window Oz doesn't have: a tab that came forward (it takes the place of the one
+            // that was showing), or one it missed. Either way it is looked at like a new one.
+            addWindow(el, pid: pid, mode: .created)
             return
         }
         if !refocus { restoreMaximized(focusing: w) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Timing.tabCheck) { [weak self] in self?.putAwayTabs(pid: pid) }
         trackedFocus = w.id
         guard gesture == nil, windows[w.id] != nil, let (_, strip) = locate(w.id) else { return }
         let wid = w.id

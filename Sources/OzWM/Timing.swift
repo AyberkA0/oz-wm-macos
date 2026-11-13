@@ -46,6 +46,15 @@ enum Timing {
     /// Once a focused window closes, its neighbour is focused after this long.
     static let focusNeighbor: CFTimeInterval = 0.12
 
+    /// A new window born exactly on another of its app is most likely a tab of it: whether
+    /// that other one has gone behind it is known after this long.
+    static let tabJoin: CFTimeInterval = 0.25
+    /// A window's tab closed: the tab behind it has come forward within this long.
+    static let tabForward: CFTimeInterval = 0.15
+    /// After focus moved within an app, its windows are checked for ones that became tabs
+    /// behind another (windows merged) this much later.
+    static let tabCheck: CFTimeInterval = 0.5
+
     // MARK: Desktops, screens, the lock screen
 
     /// The window server settles a new desktop in this long.

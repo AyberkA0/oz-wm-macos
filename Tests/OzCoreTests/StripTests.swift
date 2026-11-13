@@ -256,6 +256,24 @@ final class StripTests: XCTestCase {
         XCTAssertEqual(t.rows.map(\.windows), [[9], [2]])
     }
 
+    func testReplaceKeepsThePlace() {
+        // [1] [2 | 3]: 7 takes 2's place (another tab of the same window).
+        let s = makeStrip([300, 400])
+        s.insertBeside(3, anchor: 2, right: true)
+        s.setWidthFraction(2, 0.25)
+        let weight = s.weight(2)
+        s.focused = 2
+        XCTAssertTrue(s.replace(2, with: 7))
+        XCTAssertEqual(s.rows.map(\.windows), [[1], [7, 3]])
+        XCTAssertEqual(s.rows[1].height, 400)
+        XCTAssertEqual(s.weight(7), weight)
+        XCTAssertNil(s.widthWeights[2])
+        XCTAssertEqual(s.focused, 7)
+        // Not for a window that isn't there, nor by one that already is.
+        XCTAssertFalse(s.replace(2, with: 8))
+        XCTAssertFalse(s.replace(7, with: 3))
+    }
+
     func testMoveAndNeighbors() {
         let s = makeStrip([300, 300, 300])
         XCTAssertTrue(s.moveVertical(1, by: 1))
