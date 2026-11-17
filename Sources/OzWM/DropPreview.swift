@@ -86,35 +86,49 @@ private final class GlassLight: NSView {
 }
 
 /// A pane of glass `radius` round with its light: clear Liquid Glass with a see-through
-/// layer of blur over it, or the frosted material alone before macOS 26. The clear style alone
-/// bends what's behind it like a lens at the edges, and the regular one is thickly frosted:
-/// the blur, more than half there, frosts it a little, and across `edgeBand` points from the
-/// edge rises to nearly whole, hiding most of the bending there. Without a band (a thin rod,
-/// all edge) it is nearly whole throughout.
+/// layer of frosting over it, or the frosted material alone before macOS 26. The clear style
+/// alone bends what's behind it like a lens at the edges, and the regular one is thickly
+/// frosted: the frosting, under half there, blurs what's behind a little, and across `edgeBand`
+/// points from the edge rises to most of the way, hiding much of the bending there. Without a
+/// band (a thin rod, all edge) it is about half there throughout. The frosting is light and
+/// dark blur mixed: light alone turns dark windows behind it milky white, dark alone greys
+/// out light ones.
 private func glassPane(radius: CGFloat, edgeBand: CGFloat? = nil) -> NSView {
     let light = GlassLight(radius: radius)
-    let blur = NSVisualEffectView()
-    blur.blendingMode = .behindWindow
-    blur.state = .active
-    blur.wantsLayer = true
-    blur.layer?.cornerRadius = radius
-    blur.layer?.masksToBounds = true
+    func blur(_ material: NSVisualEffectView.Material) -> NSVisualEffectView {
+        let v = NSVisualEffectView()
+        v.material = material
+        v.blendingMode = .behindWindow
+        v.state = .active
+        v.wantsLayer = true
+        v.layer?.cornerRadius = radius
+        v.layer?.masksToBounds = true
+        return v
+    }
     guard #available(macOS 26.0, *) else {
-        blur.material = .hudWindow
-        light.frame = blur.bounds
+        let frosted = blur(.hudWindow)
+        light.frame = frosted.bounds
         light.autoresizingMask = [.width, .height]
-        blur.addSubview(light)
-        return blur
+        frosted.addSubview(light)
+        return frosted
     }
-    blur.material = .popover
-    if let edgeBand {
-        blur.maskImage = blurMask(radius: radius, band: edgeBand, inner: 0.6, edge: 0.95)
-    } else {
-        blur.alphaValue = 0.9
+    // (look, share): how much of the frosting each blur gives.
+    let mix: [(NSAppearance.Name, CGFloat)] = [(.aqua, 0.6), (.darkAqua, 0.4)]
+    var views: [NSView] = []
+    for (look, share) in mix {
+        let frost = blur(.popover)
+        frost.appearance = NSAppearance(named: look)
+        if let edgeBand {
+            frost.maskImage = blurMask(radius: radius, band: edgeBand, inner: 0.45 * share, edge: 0.75 * share)
+        } else {
+            frost.alphaValue = 0.6 * share
+        }
+        views.append(frost)
     }
-    // The light beside the blur, not in it: the blur's see-through-ness would dim it too.
+    // The light beside the frosting, not in it: its see-through-ness would dim it too.
+    views.append(light)
     let content = NSView()
-    for v in [blur, light] as [NSView] {
+    for v in views {
         v.frame = content.bounds
         v.autoresizingMask = [.width, .height]
         content.addSubview(v)
@@ -123,6 +137,8 @@ private func glassPane(radius: CGFloat, edgeBand: CGFloat? = nil) -> NSView {
     glass.style = .clear
     glass.cornerRadius = radius
     glass.contentView = content
+    // The light glass in Dark Mode too: the dark one turns the pane into a dark slab.
+    glass.appearance = NSAppearance(named: .aqua)
     return glass
 }
 
