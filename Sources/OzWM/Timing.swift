@@ -49,6 +49,9 @@ enum Timing {
     /// A new window born exactly on another of its app is most likely a tab of it: whether
     /// that other one has gone behind it is known after this long.
     static let tabJoin: CFTimeInterval = 0.25
+    /// Its app said a window went, but the window server still has it: whether it really
+    /// closed (a closing animation ends) is asked again this much later.
+    static let closeCheck: CFTimeInterval = 0.5
     /// A window's tab closed: the tab behind it has come forward within this long.
     static let tabForward: CFTimeInterval = 0.15
     /// After focus moved within an app, its windows are checked for ones that became tabs

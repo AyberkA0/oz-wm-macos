@@ -9,7 +9,9 @@ struct StripKey: Hashable {
 
 final class ManagedWindow {
     let id: CGWindowID
-    let element: AXUIElement
+    /// How its app shows it to Accessibility. An app may make a new one for the same window
+    /// (Chrome, around sleep and the lock screen): see `adoptElement`.
+    var element: AXUIElement
     let pid: pid_t
     let appName: String
     let bundleID: String?
@@ -1032,6 +1034,7 @@ final class WindowManager {
             forgetFloating(id)
         }
         for p in found {
+            adoptElement(p)
             if windows[p.id] != nil {
                 if !p.manageable {
                     unmanage(p.id, focusNeighbor: false)
@@ -1088,6 +1091,7 @@ final class WindowManager {
 
     private func add(_ probe: WindowProbe, mode: AddMode, tabChecked: Bool = false) {
         let wid = probe.id, pid = probe.pid, el = probe.element
+        adoptElement(probe)
         guard enabled, pid != getpid(), windows[wid] == nil, floating[wid] == nil, probe.manageable else { return }
         let app = NSRunningApplication(processIdentifier: pid)
         if app?.isHidden == true { return }
@@ -1318,8 +1322,13 @@ final class WindowManager {
     /// and wait among the tabs behind.
     /// First the app is asked for its windows: the tab now in front, if Oz doesn't have it
     /// (it came forward unseen), takes the place of the one behind instead.
+    ///
+    /// A window counts as a tab behind another only when its app says so too: it is missing
+    /// from the app's own list of windows, and a window of the same size is in that list, on a
+    /// desktop. (With the lid closed, or at the lock screen, macOS places no window on any
+    /// desktop: a window in a region taken for a tab then was put back into the strip.)
     private func putAwayTabs(pid: pid_t?) {
-        guard enabled else { return }
+        guard enabled, !screenLocked else { return }
         func behind(_ pid: pid_t?) -> [ManagedWindow] {
             (Array(windows.values) + Array(floating.values)).filter {
                 (pid == nil || $0.pid == pid) && !closing.contains($0.id) && isBehindAnotherTab($0.id)
@@ -1329,15 +1338,52 @@ final class WindowManager {
             writer.perform(pid: pid) { [weak self] in
                 let probes = WindowProbe.readApp(pid)
                 DispatchQueue.main.async {
-                    guard let self, self.enabled else { return }
+                    guard let self, self.enabled, !self.screenLocked, !probes.isEmpty else { return }
+                    let listed = Set(probes.map(\.id))
+                    let showing = probes.filter { $0.manageable && Spaces.space(of: $0.id) != nil }
+                    func hasTabInFront(_ w: ManagedWindow) -> Bool {
+                        guard !listed.contains(w.id), let size = WindowServer.window(w.id)?.bounds.size ?? w.lastFrame?.size else {
+                            return false
+                        }
+                        return showing.contains { p in
+                            guard let f = p.frame else { return false }
+                            return abs(f.width - size.width) <= 2 && abs(f.height - size.height) <= 2
+                        }
+                    }
                     probes.forEach { self.add($0, mode: .created, tabChecked: true) }
-                    for w in behind(pid) {
+                    for w in behind(pid) where hasTabInFront(w) {
                         Log.info("\(w.appName): window \(w.id) is a tab behind another now; out of its place")
                         self.unmanage(w.id, focusNeighbor: false)
                         self.backgroundTabs[w.id] = w
                     }
                 }
             }
+        }
+    }
+
+    /// The app shows a window Oz has through a new Accessibility element (it made the old one
+    /// anew, as Chrome does around sleep): Oz works through the new one from now on.
+    private func adoptElement(_ probe: WindowProbe) {
+        guard let w = windows[probe.id] ?? floating[probe.id], w.pid == probe.pid,
+              !CFEqual(w.element, probe.element) else { return }
+        w.element = probe.element
+        observers[probe.pid]?.watch(window: probe.element)
+        Log.debug("\(w.appName): window \(w.id) has a new accessibility element")
+    }
+
+    /// The app says the window's element is gone. Usually the window closed; but an app may
+    /// only have made its element anew while the window stays (Chrome, when the lid closes or
+    /// the screen locks). A window the window server still has a moment later is kept as it
+    /// is, in its row or region, and picked up again through its new element. Taken for
+    /// closed, it was found again as a new window and put into the strip.
+    private func elementDestroyed(_ w: ManagedWindow) {
+        guard WindowServer.window(w.id) != nil else { return windowClosed(w) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Timing.closeCheck) { [weak self] in
+            guard let self, self.windows[w.id] === w || self.floating[w.id] === w else { return }
+            guard WindowServer.window(w.id) != nil else { return self.windowClosed(w) }
+            Log.info("\(w.appName): window \(w.id) is still there though its app said it went; kept")
+            // Its new element: now, or at the next scan if the app lists nothing yet (locked).
+            self.scanApp(w.pid, mode: .scan)
         }
     }
 
@@ -1409,7 +1455,7 @@ final class WindowManager {
             if let id = backgroundTabs.first(where: { $0.value.pid == pid && CFEqual($0.value.element, element) })?.key {
                 backgroundTabs.removeValue(forKey: id)
             } else if let w = find(element, pid: pid, askApp: false) {
-                windowClosed(w)
+                elementDestroyed(w)
             }
         case kAXWindowMiniaturizedNotification:
             guard let w = find(element, pid: pid, askApp: false) else { return }
