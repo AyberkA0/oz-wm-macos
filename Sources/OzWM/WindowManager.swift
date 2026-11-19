@@ -330,6 +330,9 @@ final class WindowManager {
     private var escapeAsks = 0
     /// Looks at memory use while the live capture rate is automatic.
     private var liveRateTimer: Timer?
+    /// macOS's memory pressure reports, and whether the last said critical.
+    private var memoryPressure: DispatchSourceMemoryPressure?
+    private var memoryCritical = false
     /// Oz's windows by when they last had focus, the latest first.
     private var focusHistory: [CGWindowID] = []
     private var deskTimer: Timer?
@@ -3619,6 +3622,18 @@ final class WindowManager {
         }
         if liveRateTimer == nil { Log.info("live capture rate: automatic") }
         updateLiveRate()
+        if memoryPressure == nil {
+            // macOS saying memory is critically short (and when it isn't any more): at once,
+            // not at the next look.
+            let source = DispatchSource.makeMemoryPressureSource(eventMask: [.normal, .warning, .critical], queue: .main)
+            source.setEventHandler { [weak self, weak source] in
+                guard let self, let source else { return }
+                self.memoryCritical = source.data.contains(.critical)
+                if self.liveRateTimer != nil { self.updateLiveRate() }
+            }
+            source.resume()
+            memoryPressure = source
+        }
         if liveRateTimer == nil {
             liveRateTimer = Timer.scheduledTimer(withTimeInterval: Timing.liveRateCheck, repeats: true) { [weak self] _ in
                 self?.updateLiveRate()
@@ -3628,9 +3643,10 @@ final class WindowManager {
 
     private func updateLiveRate() {
         guard let used = SystemMemory.usedShare() else { return }
-        let fps = LiveRate.fps(memoryUsed: used)
+        let fps = LiveRate.fps(memoryUsed: used, critical: memoryCritical)
         guard fps != overlays.liveFPS else { return }
-        Log.info(String(format: "live capture rate: %.0f fps (%.0f%% of memory in use)", fps, used * 100))
+        Log.info(String(format: "live capture rate: %.0f fps (%.0f%% of memory in use%@)", fps, used * 100,
+                        memoryCritical ? ", macOS says critically short" : ""))
         overlays.liveFPS = fps
     }
 

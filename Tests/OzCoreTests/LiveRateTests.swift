@@ -3,11 +3,17 @@ import XCTest
 
 final class LiveRateTests: XCTestCase {
     func testRateDropsAsMemoryFills() {
-        XCTAssertEqual(LiveRate.fps(memoryUsed: 0.3), 24)
-        XCTAssertEqual(LiveRate.fps(memoryUsed: 0.5), 24)    // "above" half: not yet
-        XCTAssertEqual(LiveRate.fps(memoryUsed: 0.6), 18)    // 25% less
-        XCTAssertEqual(LiveRate.fps(memoryUsed: 0.8), 12)    // 50% less
-        XCTAssertEqual(LiveRate.fps(memoryUsed: 0.95), 4)    // 85% less (3.6, rounded)
+        XCTAssertEqual(LiveRate.fps(memoryUsed: 0.3), 30)
+        XCTAssertEqual(LiveRate.fps(memoryUsed: 0.5), 30)    // "above" half: not yet
+        XCTAssertEqual(LiveRate.fps(memoryUsed: 0.6), 23)    // 25% less (22.5, rounded)
+        XCTAssertEqual(LiveRate.fps(memoryUsed: 0.8), 15)    // 50% less
+        XCTAssertEqual(LiveRate.fps(memoryUsed: 0.95), 5)    // 85% less (4.5, rounded)
+    }
+
+    func testExtremesGoDownToOneFrame() {
+        XCTAssertEqual(LiveRate.fps(memoryUsed: 0.95), 5)
+        XCTAssertEqual(LiveRate.fps(memoryUsed: 0.97), 1)
+        XCTAssertEqual(LiveRate.fps(memoryUsed: 0.4, critical: true), 1)
     }
 
     func testNeverZero() {
