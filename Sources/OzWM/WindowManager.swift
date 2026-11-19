@@ -328,6 +328,8 @@ final class WindowManager {
     }
     /// Asks to start or end escape mode so far (one waiting for an app's answer checks it).
     private var escapeAsks = 0
+    /// Looks at memory use while the live capture rate is automatic.
+    private var liveRateTimer: Timer?
     /// Oz's windows by when they last had focus, the latest first.
     private var focusHistory: [CGWindowID] = []
     private var deskTimer: Timer?
@@ -412,7 +414,7 @@ final class WindowManager {
         }
         if settings.topOverflow == .slide { snapshots.requestPermissionOnce() }
         overlays.live = settings.livePeek
-        overlays.liveFPS = settings.livePeekFPS
+        applyLiveRate()
         overlays.captureScale = settings.captureScale
         snapshots.scale = settings.captureScale
         setupSnapshots()
@@ -975,7 +977,7 @@ final class WindowManager {
         if settings.topOverflow == .slide { snapshots.requestPermissionOnce() }
         overlays.hideAll()
         overlays.live = settings.livePeek
-        overlays.liveFPS = settings.livePeekFPS
+        applyLiveRate()
         overlays.captureScale = settings.captureScale
         snapshots.scale = settings.captureScale
         for w in windows.values { w.lastFrame = nil; w.parked = false }
@@ -3602,6 +3604,34 @@ final class WindowManager {
             return false
         }
         return true
+    }
+
+    // MARK: Live capture rate
+
+    /// The live capture rate set, or with `livePeekFPS: 0` one that follows how much memory is
+    /// in use (looked at every few seconds while it is automatic).
+    private func applyLiveRate() {
+        guard settings.livePeekFPS <= 0 else {
+            liveRateTimer?.invalidate()
+            liveRateTimer = nil
+            overlays.liveFPS = settings.livePeekFPS
+            return
+        }
+        if liveRateTimer == nil { Log.info("live capture rate: automatic") }
+        updateLiveRate()
+        if liveRateTimer == nil {
+            liveRateTimer = Timer.scheduledTimer(withTimeInterval: Timing.liveRateCheck, repeats: true) { [weak self] _ in
+                self?.updateLiveRate()
+            }
+        }
+    }
+
+    private func updateLiveRate() {
+        guard let used = SystemMemory.usedShare() else { return }
+        let fps = LiveRate.fps(memoryUsed: used)
+        guard fps != overlays.liveFPS else { return }
+        Log.info(String(format: "live capture rate: %.0f fps (%.0f%% of memory in use)", fps, used * 100))
+        overlays.liveFPS = fps
     }
 
     // MARK: Escape mode

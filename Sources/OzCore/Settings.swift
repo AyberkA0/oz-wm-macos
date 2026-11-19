@@ -51,7 +51,7 @@ public struct Settings {
     public var minVisible: CGFloat = 80
     /// Peeking (top-overflowing) windows stream live content (video keeps playing).
     public var livePeek = true
-    /// Frame rate of the live peek.
+    /// Frame rate of the live peek. 0: automatic, lower as memory fills up (see `LiveRate`).
     public var livePeekFPS = 12.0
     /// Resolution of window captures (snapshots and live frames) as a fraction of the window's
     /// own: 1 keeps every pixel (lossless), 0.75 / 0.5 / 0.25 use less memory and capture work.
@@ -117,7 +117,7 @@ public struct Settings {
         if let v = r.choice("topOverflow", TopOverflow.self) { topOverflow = v }
         if let v = r.number("minVisible") { minVisible = CGFloat(max(0, v)) }
         if let v = r.bool("livePeek") { livePeek = v }
-        if let v = r.number("livePeekFPS", "above 0", where: { $0 > 0 }) { livePeekFPS = min(v, 60) }
+        if let v = r.number("livePeekFPS", "0 (automatic) or more", where: { $0 >= 0 }) { livePeekFPS = min(v, 60) }
         if let v = r.number("captureScale", share, where: { $0 > 0 && $0 <= 1 }) { captureScale = CGFloat(max(v, 0.1)) }
         if let v = r.bool("slowAppProxy") { slowAppProxy = v }
         if let v = r.bool("smoothScroll") { smoothScroll = v }

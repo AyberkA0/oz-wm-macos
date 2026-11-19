@@ -104,6 +104,8 @@ enum Timing {
     /// A file dropped on the window floating over the cleared desktop: everything goes back
     /// only this much later, once the window has taken it.
     static let afterDrop: CFTimeInterval = 0.4
+    /// With the live capture rate automatic, memory use is looked at this often.
+    static let liveRateCheck: TimeInterval = 5
 
     // MARK: Bookkeeping
 

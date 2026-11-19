@@ -173,7 +173,9 @@ private struct SettingsView: View {
                     Text("Hide").tag(TopOverflow.hide)
                 }
                 Toggle("Keep them alive (live capture)", isOn: model.binding(\.livePeek, ["livePeek"], json: { $0 }))
-                slider("Live capture rate", model.binding(\.livePeekFPS, ["livePeekFPS"], json: { $0 }), 4...30, step: 1, unit: "fps")
+                // All the way left: automatic, lower as memory fills up (4 fps is the least set by hand).
+                slider("Live capture rate", model.binding(\.livePeekFPS, ["livePeekFPS"], json: { $0 }), 0...30, step: 1, unit: "fps",
+                       zero: "Auto", floor: 4)
                     .disabled(!model.s.livePeek)
                 Picker("Capture resolution", selection: model.binding(\.captureScale, ["captureScale"], json: { Double($0) })) {
                     Text("1x (same as the window, lossless)").tag(CGFloat(1))
@@ -254,16 +256,23 @@ private struct SettingsView: View {
         }
     }
 
+    /// `zero`: what 0 means, shown instead of the number; values between 0 and `floor` go to
+    /// whichever of the two is nearer.
     private func slider(_ title: String, _ value: Binding<Double>, _ range: ClosedRange<Double>, step: Double,
-                        unit: String = "", percent: Bool = false) -> some View {
+                        unit: String = "", percent: Bool = false, zero: String? = nil, floor: Double = 0) -> some View {
         LabeledContent(title) {
             HStack {
                 // No tick marks (dozens of them crowd the row); values still go in `step`s.
                 Slider(value: Binding(get: { value.wrappedValue },
-                                      set: { value.wrappedValue = min(max(($0 / step).rounded() * step, range.lowerBound), range.upperBound) }),
+                                      set: {
+                                          var v = min(max(($0 / step).rounded() * step, range.lowerBound), range.upperBound)
+                                          if zero != nil, v > 0, v < floor { v = v < floor / 2 ? 0 : floor }
+                                          value.wrappedValue = v
+                                      }),
                        in: range)
                     .frame(width: 180)
-                Text(percent ? "\(Int((value.wrappedValue * 100).rounded()))%"
+                Text(zero != nil && value.wrappedValue == 0 ? zero!
+                             : percent ? "\(Int((value.wrappedValue * 100).rounded()))%"
                              : step >= 1 ? "\(Int(value.wrappedValue)) \(unit)"
                                          : String(format: "%.2f %@", value.wrappedValue, unit))
                     .monospacedDigit()

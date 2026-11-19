@@ -221,7 +221,7 @@ final class LiveMirror {
     /// Main thread: (frame, signature for change detection). The frame is nil when the
     /// window hasn't changed since the last one (nothing to correct or draw).
     var onFrame: ((CGImage?, Int) -> Void)?
-    private let fps: Double
+    private var fps: Double
     private let scale: CGFloat
     private var timer: DispatchSourceTimer?
     private let lock = NSLock()
@@ -293,6 +293,14 @@ final class LiveMirror {
         timer?.cancel()
         timer = nil
         onFrame = nil
+    }
+
+    /// Goes on at another rate (automatic rate: memory filled up or freed).
+    func setFPS(_ value: Double) {
+        let f = min(max(value, 1), 60)
+        guard f != fps else { return }
+        fps = f
+        timer?.schedule(deadline: .now() + 1.0 / f, repeating: 1.0 / f, leeway: .milliseconds(4))
     }
 }
 
@@ -520,7 +528,10 @@ final class OverlayManager {
     var onDragHover: ((CGWindowID) -> Void)?
     /// Stream live content into peeks instead of showing a still snapshot.
     var live = true
-    var liveFPS = 24.0
+    var liveFPS = 24.0 {
+        // The streams running now change rate too.
+        didSet { if liveFPS != oldValue { overlays.values.forEach { $0.mirror?.setFPS(liveFPS) } } }
+    }
     /// Resolution of live frames (the `captureScale` setting).
     var captureScale: CGFloat = 1
 
