@@ -3779,7 +3779,8 @@ final class WindowManager {
     /// Another window got focus (Dock, ⌘Tab, a click): a window filling its screen goes back
     /// into the strip.
     private func restoreMaximized(focusing w: ManagedWindow) {
-        for (id, _) in state.zoomed where id != w.id { unzoom(id) }
+        let space = Spaces.space(of: w.id)
+        for (id, _) in state.zoomed where id != w.id && !onOtherDesktop(id, than: space) { unzoom(id) }
         if let (key, _) = locate(w.id) {
             if let id = maximizedID(key), id != w.id { setMaximized(id, false) }
             return
@@ -3796,13 +3797,17 @@ final class WindowManager {
               || state.zoomed.contains(where: { floating[$0.id].map { $0.pid != pid } ?? false }) else { return }
         writer.perform(pid: pid) { [weak self] in
             guard let frame = AX.frame(el) else { return }
-            DispatchQueue.main.async { self?.restoreMaximized(at: frame, except: pid) }
+            let wid = AX.windowID(el)
+            DispatchQueue.main.async {
+                self?.restoreMaximized(at: frame, except: pid, space: wid.flatMap { Spaces.space(of: $0) })
+            }
         }
     }
 
-    private func restoreMaximized(at frame: CGRect, except pid: pid_t?, keep: CGWindowID? = nil) {
+    /// `space`: the desktop of the window that got focus, if known.
+    private func restoreMaximized(at frame: CGRect, except pid: pid_t?, keep: CGWindowID? = nil, space: SpaceID? = nil) {
         let center = CGPoint(x: frame.midX, y: frame.midY)
-        for (id, before) in state.zoomed where id != keep {
+        for (id, before) in state.zoomed where id != keep && !onOtherDesktop(id, than: space) {
             guard let w = floating[id] else { state[id].zoom = nil; continue }
             guard w.pid != pid, Geometry.ax(Geometry.screen(containingAX: CGPoint(x: before.midX, y: before.midY))?.frame ?? .zero)
                 .contains(center) else { continue }
@@ -3812,6 +3817,13 @@ final class WindowManager {
             guard let id = maximizedID(key), id != keep, let m = windows[id], m.pid != pid else { continue }
             setMaximized(id, false)
         }
+    }
+
+    /// The window is on another desktop than `space`: switching desktops gives focus to a
+    /// window on the new one, which is not leaving a window zoomed on the old one.
+    private func onOtherDesktop(_ id: CGWindowID, than space: SpaceID?) -> Bool {
+        guard let space, let its = Spaces.space(of: id) else { return false }
+        return its != space
     }
 
     /// A floating or docked window's title bar was double clicked: if its app zooms it,
