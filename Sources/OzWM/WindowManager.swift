@@ -317,6 +317,10 @@ final class WindowManager {
         var closing = false
     }
     private var desk: DeskClear?
+    /// Asks to start or end escape mode so far (one waiting for an app's answer checks it).
+    private var escapeAsks = 0
+    /// Oz's windows by when they last had focus, the latest first.
+    private var focusHistory: [CGWindowID] = []
     private var deskTimer: Timer?
     /// When `revealOnMouseUp` was set: the click's focus change can come before Oz hears of
     /// the press itself, and then belongs to this press, not an earlier one.
@@ -1645,6 +1649,7 @@ final class WindowManager {
         if !refocus { restoreMaximized(focusing: w) }
         DispatchQueue.main.asyncAfter(deadline: .now() + Timing.tabCheck) { [weak self] in self?.putAwayTabs(pid: pid) }
         trackedFocus = w.id
+        noteFocus(w.id)
         guard gesture == nil, windows[w.id] != nil, let (_, strip) = locate(w.id) else { return }
         let wid = w.id
         strip.focused = wid
@@ -3307,6 +3312,7 @@ final class WindowManager {
     /// without blocking the main thread on a slow app.
     private func activate(_ w: ManagedWindow) {
         trackedFocus = w.id
+        noteFocus(w.id)
         let pid = w.pid
         let element = w.element
         let name = w.appName
@@ -3589,6 +3595,8 @@ final class WindowManager {
     /// the files under it can be reached. Dragging something, it stays to take the drop.
     /// Again: everything goes back. `on`: only on, or only off (a key held, then let go).
     private func toggleEscapeMode(on: Bool? = nil) -> Bool {
+        // A start still waiting for an app's answer (below) is called off by any later ask.
+        escapeAsks += 1
         if on == true && desk != nil { return true }
         if on == false && desk == nil { return true }
         if desk != nil {
@@ -3600,8 +3608,48 @@ final class WindowManager {
             }
             return true
         }
-        guard enabled, !overviewActive, let id = focusedWindowID(), let w = windows[id] ?? floating[id],
-              let current = w.lastFrame ?? WindowServer.window(id)?.bounds else { return false }
+        guard enabled, !overviewActive else { return false }
+        // The pointer on a window's traffic lights (close, minimize, zoom): that window comes to
+        // the front and escapes. Where they are exactly, its app says; asked only when the
+        // pointer is near the window's top left corner at all.
+        let m = NSEvent.mouseLocation, p = CGPoint(x: m.x, y: Geometry.primaryHeight - m.y)
+        if let hit = WindowServer.appWindow(at: p), let w = windows[hit.id] ?? floating[hit.id],
+           CGRect(x: hit.bounds.minX, y: hit.bounds.minY, width: 110, height: 64).contains(p) {
+            let ask = escapeAsks, element = w.element, corner = hit.bounds.origin
+            writer.perform(pid: w.pid) { [weak self] in
+                let buttons = [kAXCloseButtonAttribute, kAXMinimizeButtonAttribute, kAXZoomButtonAttribute]
+                    .compactMap { AX.element(element, $0).flatMap { AX.frame($0) } }
+                DispatchQueue.main.async {
+                    guard let self, self.escapeAsks == ask, self.desk == nil else { return }
+                    // No buttons of macOS's (an app drawing its own title bar): where they usually are.
+                    let lights = buttons.dropFirst().reduce(buttons.first) { $0?.union($1) }?.insetBy(dx: -6, dy: -6)
+                        ?? CGRect(x: corner.x, y: corner.y, width: 80, height: 40)
+                    let picked = lights.contains(p) && (self.windows[w.id] ?? self.floating[w.id]) === w ? w : nil
+                    _ = self.startEscape(with: picked)
+                }
+            }
+            return true
+        }
+        return startEscape(with: nil)
+    }
+
+    /// Starts escape mode with `picked` (brought to the front first), or the window in front.
+    private func startEscape(with picked: ManagedWindow?) -> Bool {
+        // No window of Oz's in front (the desktop, an app it leaves alone): the one that last
+        // was, if it is on a desktop showing now, comes to the front and escapes.
+        var front = focusedWindowID().flatMap { windows[$0] ?? floating[$0] }
+        var bring = picked.flatMap { $0 === front ? nil : $0 }
+        if let picked { front = picked }
+        if front == nil, let last = lastFocusedShowing(), let w = windows[last] ?? floating[last] {
+            front = w
+            bring = w
+        }
+        if let b = bring {
+            if let (_, strip) = locate(b.id) { strip.focused = b.id }
+            activate(b)
+        }
+        guard let w = front, let current = w.lastFrame ?? WindowServer.window(w.id)?.bounds else { return false }
+        let id = w.id
         let tiled = windows[id] != nil
         let key: StripKey, screen: NSScreen
         if tiled, let (k, _) = locate(id), let s = visibleScreen(k) {
@@ -3669,6 +3717,29 @@ final class WindowManager {
         let f = item.frame
         return EscapeMode.offEdge(f, screen: Geometry.ax(screen.frame), others: otherScreenFrames(screen))
             ?? CGRect(origin: parkPoint(screen, size: f.size), size: f.size)
+    }
+
+    private func noteFocus(_ id: CGWindowID) {
+        focusHistory.removeAll { $0 == id }
+        focusHistory.insert(id, at: 0)
+        if focusHistory.count > 30 { focusHistory.removeLast() }
+    }
+
+    /// The window of Oz's that had focus last of those on a desktop showing now (bringing one
+    /// on another desktop forward would switch to it).
+    private func lastFocusedShowing() -> CGWindowID? {
+        focusHistory.removeAll { windows[$0] == nil && floating[$0] == nil }
+        // None yet since Oz started: the strip's own focused window, on the screen in use.
+        if focusHistory.isEmpty, let screen = Geometry.screenUnderMouse(),
+           let id = strips[visibleKey(for: screen)]?.focused, windows[id] != nil {
+            return id
+        }
+        return focusHistory.first { id in
+            if let (key, _) = locate(id) { return visibleScreen(key) != nil }
+            guard let f = floating[id]?.lastFrame,
+                  let screen = Geometry.screen(containingAX: CGPoint(x: f.midX, y: f.midY)) else { return false }
+            return Spaces.space(of: id) == Spaces.current(on: screen)
+        }
     }
 
     /// The left button is down dragging something (a file, text, a link), not a window.
