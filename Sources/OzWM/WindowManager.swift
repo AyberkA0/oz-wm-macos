@@ -317,6 +317,8 @@ final class WindowManager {
         var closing = false
     }
     private var desk: DeskClear?
+    /// Escape mode's window going back to its row, until when: drawn as a picture too.
+    private var escapeReturn: (id: CGWindowID, until: CFTimeInterval)?
     /// Asks to start or end escape mode so far (one waiting for an app's answer checks it).
     private var escapeAsks = 0
     /// Oz's windows by when they last had focus, the latest first.
@@ -3127,26 +3129,32 @@ final class WindowManager {
         }
         switch placement {
         case .frame(let r):
+            // Escape mode's window changes size as it goes: a picture of it stretched along is
+            // smooth, the app resizing it every frame stuttered (some take 200 ms a resize).
+            let escaping = desk?.id == w.id
+                || (escapeReturn.map { $0.id == w.id && CACurrentMediaTime() < $0.until } ?? false)
             if !state[w.id].proxied {
-                guard isSlow(w), !w.shrunk,
-                      let image = snapshots.image(w.id, size: r.size) ?? overlays.currentImage(w.id) else { return false }
+                guard isSlow(w) || escaping, !w.shrunk,
+                      let image = snapshots.image(w.id, size: r.size) ?? overlays.currentImage(w.id)
+                        ?? (escaping ? snapshots.latestImage(w.id) : nil) else { return false }
                 overlays.show(w.id, image: image, full: r, clipTop: hardTop,
                               trueColor: snapshots.isOnScreenCapture(w.id), stream: false, moving: true, below: dragging)
                 state[w.id].proxied = true
                 state[w.id].proxyShownAt = CACurrentMediaTime()
-                // The real window moves along under it until it is parked.
+                // The real window moves along under it until it is parked (not resized all the way).
                 state[w.id].take(\.pendingPark)?.cancel()
-                placeReal(w, .frame(r), screen: screen, rowHeight: r.height)
+                if !escaping { placeReal(w, .frame(r), screen: screen, rowHeight: r.height) }
                 Log.debug("proxy on \(w.id) \(w.appName)")
                 return true
             }
             // A fresh capture (requested as the motion started) replaces the warm-up picture.
-            guard let image = snapshots.image(w.id, size: r.size) ?? overlays.currentImage(w.id) else { return false }
+            guard let image = snapshots.image(w.id, size: r.size) ?? overlays.currentImage(w.id)
+                    ?? (escaping ? snapshots.latestImage(w.id) : nil) else { return false }
             overlays.show(w.id, image: image, full: r, clipTop: hardTop, stream: false, moving: true, below: dragging)
             if !w.parked {
                 if CACurrentMediaTime() - (state[w.id].proxyShownAt ?? 0) >= Timing.standInSettle {
-                    park(w, screen: screen, size: r.size)
-                } else {
+                    park(w, screen: screen, size: escaping ? nil : r.size)
+                } else if !escaping {
                     placeReal(w, .frame(r), screen: screen, rowHeight: r.height)
                 }
             }
@@ -3679,7 +3687,7 @@ final class WindowManager {
         }
         // Until it first moves out of the pointer's way: that move carries on from wherever this
         // got to (going on, it pulled the window back under the pointer).
-        if !tiled { animateFloating(w, from: current, to: target) { [weak self] in self?.desk?.id == id && self?.desk?.dodging == false } }
+        if !tiled { escapeFloating(w, from: current, to: target) { [weak self] in self?.desk?.id == id && self?.desk?.dodging == false } }
         if strips[key] != nil { relayout(key, animated: true) }
         deskTimer?.invalidate()
         deskTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.deskTick() }
@@ -3698,12 +3706,15 @@ final class WindowManager {
             pendingFrom[d.key] = visualFrames(d.key)
         }
         desk = nil
+        if windows[d.id] != nil {
+            escapeReturn = (d.id, CACurrentMediaTime() + settings.animationDuration + 0.2)
+        }
         for (id, f) in d.away {
             guard let w = floating[id] else { continue }
             animateFloating(w, from: w.lastFrame, to: f) { [weak self] in self?.desk == nil }
         }
         if let before = d.before, let w = floating[d.id] {
-            animateFloating(w, from: w.lastFrame, to: before) { [weak self] in self?.desk == nil }
+            escapeFloating(w, from: w.lastFrame, to: before) { [weak self] in self?.desk == nil }
         }
         if strips[d.key] != nil { relayout(d.key, animated: true) }
         Log.info("escape mode off: windows back")
@@ -3739,6 +3750,18 @@ final class WindowManager {
             guard let f = floating[id]?.lastFrame,
                   let screen = Geometry.screen(containingAX: CGPoint(x: f.midX, y: f.midY)) else { return false }
             return Spaces.space(of: id) == Spaces.current(on: screen)
+        }
+    }
+
+    /// The floating window of escape mode to its size there and back: in one step for an app
+    /// slow to resize (resizing it every frame stuttered), else growing or shrinking there.
+    private func escapeFloating(_ w: ManagedWindow, from: CGRect?, to: CGRect, still: @escaping () -> Bool) {
+        if writer.moveLatency(pid: w.pid) > settings.slowAppThreshold {
+            state[w.id].dockPlacedAt = CACurrentMediaTime()
+            writer.move(w.id, pid: w.pid, element: w.element, to: to, setSize: true)
+            w.lastFrame = to
+        } else {
+            animateFloating(w, from: from, to: to, still: still)
         }
     }
 
@@ -4271,7 +4294,7 @@ final class WindowManager {
             w.lastFrame = to
             return
         }
-        let start = CACurrentMediaTime()
+        let start = CACurrentMediaTime(), resize = abs(from.width - to.width) > 0.5 || abs(from.height - to.height) > 0.5
         Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
             guard let self, self.floating[id] === w, still() else { return timer.invalidate() }
             let t = min(1, (CACurrentMediaTime() - start) / duration)
@@ -4280,7 +4303,8 @@ final class WindowManager {
                            width: from.width + (to.width - from.width) * e,
                            height: from.height + (to.height - from.height) * e).integral
             self.state[id].dockPlacedAt = CACurrentMediaTime()
-            self.writer.move(id, pid: w.pid, element: w.element, to: t < 1 ? f : to, setSize: true)
+            // Only moved (sent off the screen and back): no resizing it every step.
+            self.writer.move(id, pid: w.pid, element: w.element, to: t < 1 ? f : to, setSize: resize)
             w.lastFrame = t < 1 ? f : to
             if t >= 1 { timer.invalidate() }
         }
