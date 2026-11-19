@@ -99,6 +99,8 @@ enum Timing {
     /// Something dragged from another app rests this long on a window's picture before the
     /// strip scrolls that window into view.
     static let dragHoverReveal: CFTimeInterval = 0.5
+    /// A window clicked can report its focus this much before Oz hears of the press.
+    static let focusBeforePress: CFTimeInterval = 0.3
 
     // MARK: Bookkeeping
 

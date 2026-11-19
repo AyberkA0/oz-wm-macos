@@ -295,6 +295,9 @@ final class WindowManager {
     /// A window focused while the button was down: shown (scrolled to) once it's let go, not
     /// while it's held — moving a window under a held title bar makes macOS drag it along.
     private var revealOnMouseUp: CGWindowID?
+    /// When `revealOnMouseUp` was set: the click's focus change can come before Oz hears of
+    /// the press itself, and then belongs to this press, not an earlier one.
+    private var revealNotedAt: CFTimeInterval = 0
     /// Since when the cursor rests in an edge band (scrolling starts after a short dwell, not
     /// when it merely passes through), and the timer that notices while it doesn't move.
     private var bandSince: CFTimeInterval?
@@ -1619,6 +1622,7 @@ final class WindowManager {
         if NSEvent.pressedMouseButtons & 1 != 0 {
             // Clicked: scroll to it once the button is let go (unless it turns into a drag).
             revealOnMouseUp = wid
+            revealNotedAt = CACurrentMediaTime()
         } else {
             reveal(wid)
         }
@@ -1629,7 +1633,9 @@ final class WindowManager {
         let m = NSEvent.mouseLocation
         let p = CGPoint(x: m.x, y: Geometry.primaryHeight - m.y)
         mouseDownAt = p
-        revealOnMouseUp = nil
+        // Left from an earlier press (its release went unheard): forgotten. One just noted is
+        // this press's own: the window clicked gave focus before the press reached Oz.
+        if CACurrentMediaTime() - revealNotedAt > Timing.focusBeforePress { revealOnMouseUp = nil }
         // Pressing on a gliding strip stops it where it is (like touching a scrolling list),
         // so the window under the cursor doesn't move while it's held.
         stopGlide(at: p)
