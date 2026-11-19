@@ -269,7 +269,7 @@ final class ConfigEngine {
         },
         settings: function () { return JSON.parse(JSON.stringify(settings)); },
         // oz.bind("ctrl+alt+j", "focusDown") or oz.bind("ctrl+alt+x", function () { ... })
-        // Modifier keys alone, held down: oz.bind("fn", "toggleDesktopDrop", { hold: 2, whileHeld: true })
+        // Modifier keys alone, held down: oz.bind("fn", "toggleEscapeMode", { hold: 2, whileHeld: true })
         bind: function (combo, action, options) {
           if (typeof action !== 'string' && typeof action !== 'function') {
             throw new Error("oz.bind('" + combo + "'): action must be a command name or a function");

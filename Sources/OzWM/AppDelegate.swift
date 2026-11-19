@@ -125,7 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                                             queue: .main) { [weak self] n in
             guard let self, let name = n.object as? String else { return }
             let arg = n.userInfo?["arg"] as? String
-            // "0.5" a number, "true" / "false" a yes or no (toggleDesktopDrop on or off), else text.
+            // "0.5" a number, "true" / "false" a yes or no (toggleEscapeMode on or off), else text.
             var value: Any? = arg
             if arg == "true" || arg == "false" {
                 value = arg == "true"

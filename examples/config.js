@@ -142,10 +142,10 @@ bind(S + "+pagedown", "scrollToBottom");
 
 // ── Windows ──
 bind(M + "+escape", "toggleFloat");   // take out of / back into the tiling
-// Hold fn (🌐) half a second: the desktop is cleared to drag a file from it onto the focused window (the
+// Escape mode: hold fn (🌐) half a second and the desktop is cleared to drag a file from it onto the focused window (the
 // others slide off the edges, it floats out of the pointer's way) until fn is let go. fn, as it
 // changes nothing about a drag or a click (⌥ would copy the file, ⌃ make the click a right click).
-// oz.bind("fn", "toggleDesktopDrop", { hold: 0.5, whileHeld: true });
+// oz.bind("fn", "toggleEscapeMode", { hold: 0.5, whileHeld: true });
 bind(M + "+n", "moveToNextScreen");
 bind(S + "+q", "closeWindow");
 bind(M + "+return", function () {     // new Terminal window (opens below the focused one)

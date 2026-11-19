@@ -1,9 +1,9 @@
 import CoreGraphics
 
-/// Where windows go while the desktop is cleared for a drop (`toggleDesktopDrop`): the other
+/// Where windows go while the desktop is cleared for a drop (`toggleEscapeMode`): the other
 /// windows off the screen's side edges, and the focused one small enough to keep out of the
 /// pointer's way. All frames in AX coordinates (top-left origin).
-public enum DesktopDrop {
+public enum EscapeMode {
     /// The share of the area the window may take each way: small enough that there is
     /// always somewhere to go that the pointer isn't.
     public static let widthShare: CGFloat = 0.5
