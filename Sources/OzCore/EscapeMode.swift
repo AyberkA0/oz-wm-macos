@@ -11,11 +11,12 @@ public enum EscapeMode {
     /// The pointer this close to the window (pt) sends it away.
     public static let margin: CGFloat = 40
 
-    /// The window's frame in the mode: no bigger than its share of `area`, its middle where
-    /// it was as far as the area allows.
+    /// The window's frame in the mode: no bigger than its share of `area`, its shape kept
+    /// (made smaller evenly, its picture shrinks into it without being squashed), its middle
+    /// where it was as far as the area allows.
     public static func frame(for f: CGRect, in area: CGRect) -> CGRect {
-        let w = min(f.width, (area.width * widthShare).rounded())
-        let h = min(f.height, (area.height * heightShare).rounded())
+        let k = min(1, area.width * widthShare / max(f.width, 1), area.height * heightShare / max(f.height, 1))
+        let w = (f.width * k).rounded(), h = (f.height * k).rounded()
         let x = min(max(f.midX - w / 2, area.minX), area.maxX - w)
         let y = min(max(f.midY - h / 2, area.minY), area.maxY - h)
         return CGRect(x: x, y: y, width: w, height: h).integral

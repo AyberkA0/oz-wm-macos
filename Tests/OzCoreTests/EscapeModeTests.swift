@@ -8,7 +8,8 @@ final class EscapeModeTests: XCTestCase {
 
     func testFrameShrinksToItsShareAroundItsMiddle() {
         let f = EscapeMode.frame(for: CGRect(x: 100, y: 40, width: 900, height: 800), in: area)
-        XCTAssertEqual(f.size, CGSize(width: 500, height: 480))
+        // Half the width is the tighter limit; the shape stays 9:8.
+        XCTAssertEqual(f.size, CGSize(width: 500, height: 444))
         XCTAssertEqual(f.midX, 550, accuracy: 1)
         XCTAssertTrue(area.contains(f))
     }

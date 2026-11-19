@@ -319,6 +319,13 @@ final class WindowManager {
     private var desk: DeskClear?
     /// Escape mode's window going back to its row, until when: drawn as a picture too.
     private var escapeReturn: (id: CGWindowID, until: CFTimeInterval)?
+    /// Escape mode's window as it was in its row, for the picture that grows back there (one
+    /// taken of it small would be blurred, stretched to that size).
+    private var escapeImage: (id: CGWindowID, image: CGImage)?
+    /// How long escape mode's windows take to go and come back: a longer way than a scroll.
+    private var escapeDuration: Double {
+        settings.animationDuration > 0 ? max(settings.animationDuration, 0.3) : 0
+    }
     /// Asks to start or end escape mode so far (one waiting for an app's answer checks it).
     private var escapeAsks = 0
     /// Oz's windows by when they last had focus, the latest first.
@@ -3134,8 +3141,10 @@ final class WindowManager {
             let escaping = desk?.id == w.id
                 || (escapeReturn.map { $0.id == w.id && CACurrentMediaTime() < $0.until } ?? false)
             if !state[w.id].proxied {
+                // Going back to its row (escaping, though not in escape mode any more).
+                let back = escaping && desk?.id != w.id ? escapeImage.flatMap { $0.id == w.id ? $0.image : nil } : nil
                 guard isSlow(w) || escaping, !w.shrunk,
-                      let image = snapshots.image(w.id, size: r.size) ?? overlays.currentImage(w.id)
+                      let image = back ?? snapshots.image(w.id, size: r.size) ?? overlays.currentImage(w.id)
                         ?? (escaping ? snapshots.latestImage(w.id) : nil) else { return false }
                 overlays.show(w.id, image: image, full: r, clipTop: hardTop,
                               trueColor: snapshots.isOnScreenCapture(w.id), stream: false, moving: true, below: dragging)
@@ -3683,12 +3692,13 @@ final class WindowManager {
         for (fid, f) in away {
             guard let fw = floating[fid] else { continue }
             let to = EscapeMode.offEdge(f, screen: sf, others: others) ?? CGRect(origin: parkPoint(screen, size: f.size), size: f.size)
-            animateFloating(fw, from: f, to: to) { [weak self] in self?.desk?.key == key }
+            animateFloating(fw, from: f, to: to, duration: escapeDuration) { [weak self] in self?.desk?.key == key }
         }
         // Until it first moves out of the pointer's way: that move carries on from wherever this
         // got to (going on, it pulled the window back under the pointer).
         if !tiled { escapeFloating(w, from: current, to: target) { [weak self] in self?.desk?.id == id && self?.desk?.dodging == false } }
-        if strips[key] != nil { relayout(key, animated: true) }
+        escapeImage = tiled ? snapshots.latestImage(id).map { (id, $0) } : nil
+        slideEscape(key)
         deskTimer?.invalidate()
         deskTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.deskTick() }
         Log.info("escape mode on: \(w.appName) floats, \(away.count) floating window(s) and the strip away")
@@ -3707,17 +3717,27 @@ final class WindowManager {
         }
         desk = nil
         if windows[d.id] != nil {
-            escapeReturn = (d.id, CACurrentMediaTime() + settings.animationDuration + 0.2)
+            escapeReturn = (d.id, CACurrentMediaTime() + escapeDuration + 0.2)
         }
         for (id, f) in d.away {
             guard let w = floating[id] else { continue }
-            animateFloating(w, from: w.lastFrame, to: f) { [weak self] in self?.desk == nil }
+            animateFloating(w, from: w.lastFrame, to: f, duration: escapeDuration) { [weak self] in self?.desk == nil }
         }
         if let before = d.before, let w = floating[d.id] {
             escapeFloating(w, from: w.lastFrame, to: before) { [weak self] in self?.desk == nil }
         }
-        if strips[d.key] != nil { relayout(d.key, animated: true) }
+        slideEscape(d.key)
         Log.info("escape mode off: windows back")
+    }
+
+    /// The strip's windows slide (off the edges or back) over `escapeDuration`.
+    private func slideEscape(_ key: StripKey) {
+        guard strips[key] != nil else { return }
+        if pendingFrom[key] != nil, visibleScreen(key) != nil, gesture?.key != key, escapeDuration > 0 {
+            animate(key, duration: escapeDuration)
+        } else {
+            relayout(key, animated: true)
+        }
     }
 
     /// Where a window of the strip goes while its desktop is cleared (its full frame), instead
@@ -3761,7 +3781,7 @@ final class WindowManager {
             writer.move(w.id, pid: w.pid, element: w.element, to: to, setSize: true)
             w.lastFrame = to
         } else {
-            animateFloating(w, from: from, to: to, still: still)
+            animateFloating(w, from: from, to: to, duration: escapeDuration, still: still)
         }
     }
 
@@ -4286,8 +4306,9 @@ final class WindowManager {
 
     /// Moves a floating window from `from` to `to` over `floatingAnimationDuration`, while
     /// `still()` holds (it stops if the window is zoomed or unzoomed again meanwhile).
-    private func animateFloating(_ w: ManagedWindow, from: CGRect?, to: CGRect, still: @escaping () -> Bool) {
-        let id = w.id, duration = floatingAnimationDuration
+    private func animateFloating(_ w: ManagedWindow, from: CGRect?, to: CGRect, duration given: Double? = nil,
+                                 still: @escaping () -> Bool) {
+        let id = w.id, duration = given ?? floatingAnimationDuration
         guard duration > 0, let from, !from.approxEqual(to) else {
             state[id].dockPlacedAt = CACurrentMediaTime()
             writer.move(id, pid: w.pid, element: w.element, to: to, setSize: true)
