@@ -125,7 +125,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                                             queue: .main) { [weak self] n in
             guard let self, let name = n.object as? String else { return }
             let arg = n.userInfo?["arg"] as? String
-            let done = self.wm.perform(name, arg: arg.flatMap { Double($0) }.map { NSNumber(value: $0) } ?? arg)
+            // "0.5" a number, "true" / "false" a yes or no (toggleDesktopDrop on or off), else text.
+            var value: Any? = arg
+            if arg == "true" || arg == "false" {
+                value = arg == "true"
+            } else if let n = arg.flatMap({ Double($0) }) {
+                value = NSNumber(value: n)
+            }
+            let done = self.wm.perform(name, arg: value)
             // `OzWM msg` waits to hear how it went.
             guard let reply = n.userInfo?["reply"] as? String, reply.hasPrefix("dev.oz.wm.reply.") else { return }
             let answer = Command(rawValue: name) == nil ? "unknown" : done ? "ok" : "failed"

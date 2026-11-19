@@ -101,7 +101,7 @@ enum Command: String, CaseIterable {
     case cycleHeight, cycleHeightBack, setHeight, toggleFullHeight, resizeHeight
     case cycleWidth, cycleWidthBack, setWidth, resizeWidth, equalizeRow
     case center, alignTop, scrollUp, scrollDown, scrollBy, scrollToTop, scrollToBottom
-    case toggleFloat, toggleMaximize, closeWindow, moveToNextScreen, undo
+    case toggleFloat, toggleMaximize, toggleDesktopDrop, closeWindow, moveToNextScreen, undo
     case retile, toggleTiling, toggleSpaceTiling, editScrollArea, openSettings, reloadConfig
     case missionControl, appExpose, showDesktop, launchpad
 }
@@ -295,6 +295,29 @@ final class WindowManager {
     /// A window focused while the button was down: shown (scrolled to) once it's let go, not
     /// while it's held — moving a window under a held title bar makes macOS drag it along.
     private var revealOnMouseUp: CGWindowID?
+    /// The drag pasteboard's count when the left button went down: another count while it is
+    /// still down means something (a file, text, a link) is being dragged.
+    private var dragBoardAtPress = 0
+    /// The desktop cleared for a drop (`toggleDesktopDrop`): on one screen every other window
+    /// is off its side edges, and `id` floats, small, out of the pointer's way.
+    private struct DeskClear {
+        let key: StripKey
+        let id: CGWindowID
+        /// Where `id` is, or is on its way to.
+        var frame: CGRect
+        /// `id` was floating (or docked) and goes back here; a tiled one goes back to its row.
+        let before: CGRect?
+        /// The floating and docked windows sent off the screen, and where they go back to.
+        let away: [CGWindowID: CGRect]
+        /// `id` is moving out of the pointer's way.
+        var dodging = false
+        /// Asked to end while something was being dragged to `id`: ends once it is dropped.
+        var endOnDrop = false
+        /// Dropped: about to end, and `id` keeps still meanwhile.
+        var closing = false
+    }
+    private var desk: DeskClear?
+    private var deskTimer: Timer?
     /// When `revealOnMouseUp` was set: the click's focus change can come before Oz hears of
     /// the press itself, and then belongs to this press, not an earlier one.
     private var revealNotedAt: CFTimeInterval = 0
@@ -907,6 +930,7 @@ final class WindowManager {
             for (pid, o) in observers { quietEnhancedUI(pid, app: o.app) }
             scanAll(initial: true)
         } else {
+            endDesk()
             saveLayout()
             restoreAll()
             enabled = false
@@ -1181,6 +1205,8 @@ final class WindowManager {
             height = Strip.height(forRatio: settings.defaultHeight, viewportHeight: vh, gap: settings.gap)
         }
 
+        // A window joining the strip whose desktop is cleared: it would open parked, unseen.
+        if desk?.key == key { endDesk() }
         windows[wid] = w
         if let back = state[wid].take(\.tiledPlace), back.key == key {
             // Back from the Dock, or its app shown again: to the place it had.
@@ -1391,6 +1417,7 @@ final class WindowManager {
     }
 
     private func unmanage(_ id: CGWindowID, focusNeighbor: Bool) {
+        if desk?.id == id { endDesk() }
         forgetStripState(id)
         snapshots.remove(id)
         forgetFloating(id)
@@ -1613,6 +1640,8 @@ final class WindowManager {
             addWindow(el, pid: pid, mode: .created)
             return
         }
+        // Another of Oz's windows in front (⌘Tab, the Dock): the cleared desktop is done with.
+        if let d = desk, d.id != w.id { endDesk() }
         if !refocus { restoreMaximized(focusing: w) }
         DispatchQueue.main.asyncAfter(deadline: .now() + Timing.tabCheck) { [weak self] in self?.putAwayTabs(pid: pid) }
         trackedFocus = w.id
@@ -1633,6 +1662,7 @@ final class WindowManager {
         let m = NSEvent.mouseLocation
         let p = CGPoint(x: m.x, y: Geometry.primaryHeight - m.y)
         mouseDownAt = p
+        dragBoardAtPress = NSPasteboard(name: .drag).changeCount
         // Left from an earlier press (its release went unheard): forgotten. One just noted is
         // this press's own: the window clicked gave focus before the press reached Oz.
         if CACurrentMediaTime() - revealNotedAt > Timing.focusBeforePress { revealOnMouseUp = nil }
@@ -1708,6 +1738,7 @@ final class WindowManager {
 
     private func spaceChanged() {
         guard enabled else { return }
+        endDesk()
         // Animations target the old Space's windows; finish them instantly.
         for (_, a) in animations { a.strip.renderScrollY = a.to }
         animations.removeAll()
@@ -1724,6 +1755,7 @@ final class WindowManager {
     }
 
     private func screensChanged() {
+        endDesk()
         guard enabled else { return }
         refreshUntiledIDs()
         let live = Set(NSScreen.screens.map(Geometry.displayID))
@@ -1768,6 +1800,16 @@ final class WindowManager {
     private func compareFrame(_ w: ManagedWindow, _ actual: CGRect) {
         guard enabled, !isMoving, !overviewActive, windows[w.id] === w, !w.parked, let expected = w.lastFrame,
               zoomClick?.id != w.id else { return }
+        // Floating over the cleared desktop: not its row's size or place. An app that won't
+        // get as small keeps its own size, which the pointer is kept away from then.
+        if var d = desk, d.id == w.id {
+            if !d.dodging {
+                d.frame.size = actual.size
+                desk = d
+                w.lastFrame = CGRect(origin: expected.origin, size: actual.size)
+            }
+            return
+        }
         let now = CACurrentMediaTime()
         if isMaximized(w.id) {
             // Filling the screen: if it was dragged or resized away, it goes back. Made smaller
@@ -2323,7 +2365,8 @@ final class WindowManager {
 
     /// Moves the docked windows of a desktop to their region frames.
     private func layoutDocks(_ key: StripKey, except held: CGWindowID? = nil) {
-        guard let screen = visibleScreen(key), let byRegion = docks[key] else { return }
+        // Off the screen while its desktop is cleared; back when that is over.
+        guard desk?.key != key, let screen = visibleScreen(key), let byRegion = docks[key] else { return }
         let regions = outsideRegions(screen)
         let now = CACurrentMediaTime()
         for (i, ids) in byRegion where regions.indices.contains(i) {
@@ -2816,7 +2859,7 @@ final class WindowManager {
         let from = transitions[key], t = progress(key), maxID = maximizedID(key)
         var out: [CGWindowID: CGRect] = [:]
         for item in strip.layout(params(screen), scroll: strip.renderScrollY, minHeights: state.minHeights) {
-            let to = maxID == item.id ? fullScreenFrame(screen) : item.frame
+            let to = deskTarget(item, key: key, screen: screen) ?? (maxID == item.id ? fullScreenFrame(screen) : item.frame)
             if let f = from?[item.id], let t {
                 out[item.id] = f.interpolated(to: to, t)
             } else {
@@ -2897,6 +2940,23 @@ final class WindowManager {
                 // Nor the one being dragged by the mouse (the strip may scroll under it).
                 guard item.id != resizing, item.id != dragging, !state[item.id].pinned,
                       let w = windows[item.id] else { continue }
+                if let target = deskTarget(item, key: key, screen: screen) {
+                    let floats = item.id == desk?.id
+                    if let f = from?[item.id], let t {
+                        // Sliding off the side edges, or the focused window to where it floats.
+                        let r = f.interpolated(to: target, t)
+                        place(w, floats ? .frame(r) : Strip.placement(r, p, minHeight: state[item.id].minHeight),
+                              screen: screen, rowHeight: r.height, hardTop: p.hardTop, clipBottom: floats ? .greatestFiniteMagnitude : p.clipBottom)
+                    } else if floats {
+                        // Moving out of the pointer's way: on its own, frame by frame.
+                        if desk?.dodging != true { place(w, .frame(target), screen: screen, rowHeight: target.height, hardTop: p.hardTop) }
+                    } else {
+                        place(w, .park, screen: screen, rowHeight: item.rowHeight, hardTop: p.hardTop, clipBottom: p.clipBottom)
+                    }
+                    // Its size is the floating one, not its row's: no checking that against the row.
+                    if floats { w.needsSizeCheck = false }
+                    continue
+                }
                 let full = maxID == item.id ? fullScreenFrame(screen) : nil
                 if let f = from?[item.id], let t {
                     let r = f.interpolated(to: full ?? item.frame, t)
@@ -3104,11 +3164,15 @@ final class WindowManager {
         let p = params(screen)
         for item in strip.layout(p, scroll: strip.renderScrollY, minHeights: state.minHeights) where ids.contains(item.id) {
             guard let w = windows[item.id] else { continue }
-            guard case .frame(let r) = item.placement else {
-                place(w, item.placement, screen: screen, rowHeight: item.rowHeight, hardTop: p.hardTop, clipBottom: p.clipBottom)
+            var placement = item.placement
+            if let target = deskTarget(item, key: key, screen: screen) {
+                placement = item.id == desk?.id ? .frame(target) : .park
+            }
+            guard case .frame(let r) = placement else {
+                place(w, placement, screen: screen, rowHeight: item.rowHeight, hardTop: p.hardTop, clipBottom: p.clipBottom)
                 continue
             }
-            placeReal(w, item.placement, screen: screen, rowHeight: item.rowHeight)
+            placeReal(w, placement, screen: screen, rowHeight: item.rowHeight)
             handOver(w, to: r)
         }
     }
@@ -3333,6 +3397,7 @@ final class WindowManager {
         case .missionControl: openOverview(SystemActions.missionControl); return true
         case .appExpose: openOverview(SystemActions.appExpose); return true
         case .showDesktop: SystemActions.showDesktop(); return true
+        case .toggleDesktopDrop: return toggleDesktopDrop(on: arg as? Bool)
         case .launchpad: SystemActions.launchpad(); return true
         case .retile:
             for w in windows.values { w.lastFrame = nil; w.parked = false }
@@ -3514,6 +3579,156 @@ final class WindowManager {
         return true
     }
 
+    // MARK: Desktop drop
+
+    /// Clears the desktop to drag something from it onto the focused window: every other
+    /// window on its screen slides off the side edges, and the focused one floats, at most
+    /// half the screen in size, moving out of the pointer's way whenever it comes near, so
+    /// the files under it can be reached. Dragging something, it stays to take the drop.
+    /// Again: everything goes back. `on`: only on, or only off (a key held, then let go).
+    private func toggleDesktopDrop(on: Bool? = nil) -> Bool {
+        if on == true && desk != nil { return true }
+        if on == false && desk == nil { return true }
+        if desk != nil {
+            // Let go in the middle of dragging a file there: not before it is dropped.
+            if contentDragging {
+                desk?.endOnDrop = true
+            } else {
+                endDesk()
+            }
+            return true
+        }
+        guard enabled, !overviewActive, let id = focusedWindowID(), let w = windows[id] ?? floating[id],
+              let current = w.lastFrame ?? WindowServer.window(id)?.bounds else { return false }
+        let tiled = windows[id] != nil
+        let key: StripKey, screen: NSScreen
+        if tiled, let (k, _) = locate(id), let s = visibleScreen(k) {
+            (key, screen) = (k, s)
+        } else if !tiled, let s = Geometry.screen(containingAX: CGPoint(x: current.midX, y: current.midY)) {
+            (key, screen) = (visibleKey(for: s), s)
+        } else {
+            return false
+        }
+        guard gesture?.key != key else { return false }
+        let sf = Geometry.ax(screen.frame), others = otherScreenFrames(screen)
+        // The floating and docked windows on this desktop of this screen.
+        var away: [CGWindowID: CGRect] = [:]
+        for (fid, fw) in floating where fid != id {
+            guard let f = fw.lastFrame, sf.contains(CGPoint(x: f.midX, y: f.midY)),
+                  Spaces.space(of: fid) == key.space else { continue }
+            away[fid] = f
+        }
+        if strips[key] != nil && settings.animationDuration > 0 { pendingFrom[key] = visualFrames(key) }
+        let area = Geometry.ax(screen.visibleFrame).insetBy(dx: settings.outerGap, dy: settings.outerGap)
+        let target = DesktopDrop.frame(for: current, in: area)
+        desk = DeskClear(key: key, id: id, frame: target, before: tiled ? nil : current, away: away)
+        for (fid, f) in away {
+            guard let fw = floating[fid] else { continue }
+            let to = DesktopDrop.offEdge(f, screen: sf, others: others) ?? CGRect(origin: parkPoint(screen, size: f.size), size: f.size)
+            animateFloating(fw, from: f, to: to) { [weak self] in self?.desk?.key == key }
+        }
+        if !tiled { animateFloating(w, from: current, to: target) { [weak self] in self?.desk?.id == id } }
+        if strips[key] != nil { relayout(key, animated: true) }
+        deskTimer?.invalidate()
+        deskTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.deskTick() }
+        Log.info("desktop cleared for a drop: \(w.appName) floats, \(away.count) floating window(s) and the strip away")
+        return true
+    }
+
+    /// Everything back where it was: the strip's windows slide in from the edges, the
+    /// floating ones go back to their places.
+    private func endDesk() {
+        guard let d = desk else { return }
+        deskTimer?.invalidate()
+        deskTimer = nil
+        // From where they are now (worked out while the desk still is).
+        if strips[d.key] != nil, visibleScreen(d.key) != nil, settings.animationDuration > 0 {
+            pendingFrom[d.key] = visualFrames(d.key)
+        }
+        desk = nil
+        for (id, f) in d.away {
+            guard let w = floating[id] else { continue }
+            animateFloating(w, from: w.lastFrame, to: f) { [weak self] in self?.desk == nil }
+        }
+        if let before = d.before, let w = floating[d.id] {
+            animateFloating(w, from: w.lastFrame, to: before) { [weak self] in self?.desk == nil }
+        }
+        if strips[d.key] != nil { relayout(d.key, animated: true) }
+        Log.info("desktop drop over: windows back")
+    }
+
+    /// Where a window of the strip goes while its desktop is cleared (its full frame), instead
+    /// of its place in the strip: off a side edge, or where the focused one floats.
+    private func deskTarget(_ item: LayoutItem, key: StripKey, screen: NSScreen) -> CGRect? {
+        guard let d = desk, d.key == key else { return nil }
+        if item.id == d.id { return d.frame }
+        let f = item.frame
+        return DesktopDrop.offEdge(f, screen: Geometry.ax(screen.frame), others: otherScreenFrames(screen))
+            ?? CGRect(origin: parkPoint(screen, size: f.size), size: f.size)
+    }
+
+    /// The left button is down dragging something (a file, text, a link), not a window.
+    private var contentDragging: Bool {
+        NSEvent.pressedMouseButtons & 1 != 0 && NSPasteboard(name: .drag).changeCount != dragBoardAtPress
+    }
+
+    private func otherScreenFrames(_ screen: NSScreen) -> [CGRect] {
+        NSScreen.screens.filter { $0 != screen }.map { Geometry.ax($0.frame) }
+    }
+
+    /// Every display frame: the pointer near the floating window (and nothing dragged) sends
+    /// it to the place farthest from it.
+    private func deskTick() {
+        guard var d = desk else { return }
+        if d.closing { return }
+        if d.endOnDrop {
+            // Dropped (the release can go unheard): a moment for the window to take it.
+            if NSEvent.pressedMouseButtons & 1 == 0 {
+                desk?.closing = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + Timing.afterDrop) { [weak self] in
+                    guard self?.desk?.key == d.key else { return }
+                    self?.endDesk()
+                }
+            }
+            return
+        }
+        guard !d.dodging, let w = windows[d.id] ?? floating[d.id] else { return }
+        let m = NSEvent.mouseLocation
+        let p = CGPoint(x: m.x, y: Geometry.primaryHeight - m.y)
+        guard DesktopDrop.isNear(p, d.frame) else { return }
+        // Something being dragged to it: it stays to take the drop.
+        if contentDragging { return }
+        guard let screen = Geometry.screen(containingAX: CGPoint(x: d.frame.midX, y: d.frame.midY)) else { return }
+        let area = Geometry.ax(screen.visibleFrame).insetBy(dx: settings.outerGap, dy: settings.outerGap)
+        let to = DesktopDrop.dodge(d.frame, from: p, in: area)
+        guard !to.approxEqual(d.frame) else { return }
+        let from = w.lastFrame ?? d.frame
+        d.frame = to
+        d.dodging = true
+        desk = d
+        let id = d.id, duration = settings.animationDuration > 0 ? max(settings.animationDuration, 0.2) : 0
+        let start = CACurrentMediaTime()
+        func step() -> Bool {
+            guard let cur = desk, cur.id == id, (windows[id] ?? floating[id]) === w else { return false }
+            let t = duration > 0 ? min(1, (CACurrentMediaTime() - start) / duration) : 1
+            let e = CGFloat(1 - pow(1 - t, 3))  // ease out
+            let f = t < 1 ? from.interpolated(to: to, e).integral : to
+            state[id].dockPlacedAt = CACurrentMediaTime()
+            writer.move(id, pid: w.pid, element: w.element, to: f, setSize: false)
+            w.lastFrame = f
+            w.parked = false
+            if t >= 1 {
+                desk?.dodging = false
+                return false
+            }
+            return true
+        }
+        guard step() else { return }
+        Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+            guard self != nil, step() else { return timer.invalidate() }
+        }
+    }
+
     // MARK: Mission Control
 
     /// Mission Control and App Exposé scale their thumbnails to fit every window where it
@@ -3527,6 +3742,7 @@ final class WindowManager {
             if overviewActive { overviewClosing() }
             return
         }
+        endDesk()
         overviewActive = true
         gesture = nil
         for key in Array(animations.keys) { stopAnimation(key) }
@@ -3957,6 +4173,8 @@ final class WindowManager {
     /// Puts an app-zoomed floating window back where it was, shrinking it there over
     /// `animationDuration` (a slow app just shows fewer of the steps).
     private func unzoom(_ id: CGWindowID) {
+        // Off the screen, or floating over it, while the desktop is cleared.
+        if let d = desk, d.id == id || d.away[id] != nil { return }
         guard let before = state[id].take(\.zoom)?.before, let w = floating[id] else { return }
         Log.info("unzoom floating \(id) \(w.appName)")
         animateFloating(w, from: w.zoomedFrame ?? w.lastFrame, to: before) { [weak self] in self?.state[id].zoom == nil }

@@ -81,8 +81,28 @@ final class ConfigEngine {
             self.settings = s
             self.settingsProblems = problems
         }
-        let bind: @convention(block) (String, Int) -> Bool = { [weak self] combo, id in
+        // `hold`: seconds the keys are held down, for a combo of modifiers alone (0: not given).
+        // `whileHeld`: the action runs with true once held and with false when let go: a toggle
+        // command turns on, then off (not toggled twice, which got out of step once something
+        // else had turned it off in between).
+        let bind: @convention(block) (String, Int, Double, Bool) -> Bool = { [weak self] combo, id, hold, whileHeld in
             guard let self else { return false }
+            if HoldShortcuts.parse(combo) != nil {
+                let seconds = hold > 0 ? hold : 1
+                let run = { [weak self] (held: Bool?) in self?.runBinding(id, arg: held) }
+                let ok = self.dryRun || HoldShortcuts.shared.register(combo, seconds: seconds, action: { run(whileHeld ? true : nil) },
+                                                                      release: whileHeld ? { run(false) } : nil)
+                if ok { self.boundCombos.append("\(combo) (held \(seconds) s\(whileHeld ? ", while held" : ""))") }
+                return ok
+            }
+            if whileHeld {
+                self.bindProblems.append("oz.bind('\(combo)'): whileHeld works with modifier keys alone, like \"fn\"")
+                return true
+            }
+            if hold > 0 {
+                self.bindProblems.append("oz.bind('\(combo)'): hold works with modifier keys alone, like \"ctrl+alt+shift\"")
+                return true
+            }
             let ok = self.dryRun
                 ? HotkeyCenter.parse(combo) != nil
                 : HotkeyCenter.shared.register(combo) { [weak self] in self?.runBinding(id) }
@@ -137,8 +157,9 @@ final class ConfigEngine {
         emit("configLoaded", [:])
     }
 
-    func runBinding(_ id: Int) {
-        context?.objectForKeyedSubscript("oz")?.invokeMethod("__run", withArguments: [id])
+    /// `arg`: for a binding held down (`whileHeld`), true as it starts and false when let go.
+    func runBinding(_ id: Int, arg: Bool? = nil) {
+        context?.objectForKeyedSubscript("oz")?.invokeMethod("__run", withArguments: arg.map { [id, $0] } ?? [id])
     }
 
     func emit(_ event: String, _ payload: Any) {
@@ -248,7 +269,8 @@ final class ConfigEngine {
         },
         settings: function () { return JSON.parse(JSON.stringify(settings)); },
         // oz.bind("ctrl+alt+j", "focusDown") or oz.bind("ctrl+alt+x", function () { ... })
-        bind: function (combo, action) {
+        // Modifier keys alone, held down: oz.bind("fn", "toggleDesktopDrop", { hold: 2, whileHeld: true })
+        bind: function (combo, action, options) {
           if (typeof action !== 'string' && typeof action !== 'function') {
             throw new Error("oz.bind('" + combo + "'): action must be a command name or a function");
           }
@@ -257,7 +279,13 @@ final class ConfigEngine {
             __native.warn("oz.bind('" + combo + "'): \"" + action + "\" is not a command");
             return;
           }
-          if (!__native.bind(String(combo), register(action))) {
+          var hold = options && options.hold !== undefined ? Number(options.hold) : 0;
+          if (!(hold >= 0)) {
+            __native.warn("oz.bind('" + combo + "'): hold must be a number of seconds");
+            return;
+          }
+          var whileHeld = !!(options && options.whileHeld);
+          if (!__native.bind(String(combo), register(action), hold, whileHeld)) {
             __native.warn("oz.bind('" + combo + "'): could not bind these keys (not a key Oz knows, or taken)");
           }
         },
@@ -273,10 +301,10 @@ final class ConfigEngine {
         windows: function () { return JSON.parse(__native.windows()); },
         focusedWindow: function () { return JSON.parse(__native.focused()); },
 
-        __run: function (id) {
+        __run: function (id, held) {
           var a = actions[id];
-          if (typeof a === 'string') oz.command(a);
-          else if (typeof a === 'function') a();
+          if (typeof a === 'string') oz.command(a, held);
+          else if (typeof a === 'function') a(held);
         },
         __emit: function (event, json) {
           var payload = JSON.parse(json);

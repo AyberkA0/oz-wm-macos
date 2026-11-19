@@ -101,6 +101,9 @@ enum Timing {
     static let dragHoverReveal: CFTimeInterval = 0.5
     /// A window clicked can report its focus this much before Oz hears of the press.
     static let focusBeforePress: CFTimeInterval = 0.3
+    /// A file dropped on the window floating over the cleared desktop: everything goes back
+    /// only this much later, once the window has taken it.
+    static let afterDrop: CFTimeInterval = 0.4
 
     // MARK: Bookkeeping
 

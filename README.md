@@ -242,6 +242,7 @@ oz.set({
 oz.bind("ctrl+alt+j", "focusDown");                       // a command name
 oz.bind("hyper+return", function () { oz.exec("open -na Terminal"); });  // a function
 oz.bind("ctrl+alt+1", function () { oz.setHeight(1/3); });
+oz.bind("fn", "toggleDesktopDrop", { hold: 0.5, whileHeld: true });  // modifier keys alone: held half a second, until let go
 
 oz.rule({ app: "Calculator", float: true });               // don't tile
 oz.rule({ app: /Code/, title: /Settings/, float: true });  // RegExp, arrays and functions also work
@@ -252,13 +253,15 @@ oz.on("windowCreated", function (w) { oz.log("new:", w.app, w.title); });
 oz.set({ doubleTap: { action: function () { oz.appExpose(); } } });
 ```
 
+**Dropping a file from the desktop.** `toggleDesktopDrop` clears the desktop for dragging something from it onto the focused window: the other windows on its screen slide off the side edges, and the focused one floats, at most half the screen wide, moving out of the pointer's way whenever it comes near, so the files under it can be reached. While you drag a file (or text, a link), it stays put to take the drop. The command again puts everything back (asked mid-drag, once the file is dropped); so does switching desktops or bringing another of Oz's windows to the front. It suits a key held down: `oz.bind("fn", "toggleDesktopDrop", { hold: 0.5, whileHeld: true })` clears the desktop once fn (🌐) has been held for half a second, until it is let go. A combo of modifier keys alone (`"fn"`, `"ctrl+alt+shift"`) is held for `hold` seconds (default 1); any key or click before that cancels it; with `whileHeld` the action runs with `true` once they have been held and with `false` when they are let go, so a toggle command is on exactly while they are down (a function gets the same `true` / `false`). fn is the one to hold here, as it changes nothing about a drag or a click: ⌥ held at the drop makes Finder copy the file, ⌃ turns the click into a right click, ⌘ changes the selection.
+
 **Pass-through apps.** While an app in `passThroughApps` is in front, Oz lets go of all of its shortcuts, and of the swipes made over that app's window, so they reach it; swipes over the strip still scroll it, and the double tap keeps working. The default list covers Moonlight (so its ⌃⌥⇧Q disconnect works), Parsec, Microsoft Remote Desktop, Screen Sharing, VNC Viewer, Jump Desktop, TeamViewer, AnyDesk and GeForce NOW. Entries are bundle ids or app names: `oz.set({ passThroughApps: ["com.moonlight-stream.Moonlight", "UTM"] })`.
 
 **Demo mode.** For showing Oz off: with Demo mode on (Settings, or `demoMode: true`), ⌃⌥⇧O opens a stand-in window themed on L. Frank Baum's *The Wonderful Wizard of Oz*: Kansas, the Yellow Brick Road, the Emerald City and five more, in turn. They are real windows of a little app Oz starts (`OzWM demo`), so they tile, scroll and drag like any other; their content is a plain background in GitHub's colours (light or dark, following the system) with the theme's name, laid out for the window's size. Turning demo mode off closes them.
 
 **`oz` API:** `set`, `settings()`, `bind`, `rule`, `on` (events: `windowCreated`, `windowFocused`, `windowFloated`, `swipeEnded`, `spaceChanged`, `spaceTilingChanged`, `configLoaded`), `command(name, arg)`, one function per command (`oz.focusDown()`, `oz.setHeight(0.5)`, …), `windows()`, `focusedWindow()`, `exec(cmd)` (runs in the background), `shell(cmd)` (returns the output), `notify(title, text)`, `log(...)`.
 
-**Commands:** `focusUp/Down/Left/Right/First/Last`, `focusRow(n)`, `moveUp/Down/Left/Right/First/Last`, `slurpIn`, `barfOut`, `joinUp`, `joinDown`, `cycleWidth`, `cycleWidthBack`, `setWidth(ratio)`, `resizeWidth(±ratio)`, `equalizeRow`, `cycleHeight`, `cycleHeightBack`, `setHeight(ratio|pt)`, `resizeHeight(±ratio)`, `toggleFullHeight`, `center`, `alignTop`, `scrollUp(ratio)`, `scrollDown(ratio)`, `scrollBy(pt)`, `scrollToTop`, `scrollToBottom`, `toggleFloat`, `toggleMaximize`, `closeWindow`, `moveToNextScreen`, `undo`, `retile`, `toggleTiling`, `toggleSpaceTiling`, `editScrollArea`, `openSettings`, `reloadConfig`, `missionControl`, `appExpose`, `showDesktop`, `launchpad`.
+**Commands:** `focusUp/Down/Left/Right/First/Last`, `focusRow(n)`, `moveUp/Down/Left/Right/First/Last`, `slurpIn`, `barfOut`, `joinUp`, `joinDown`, `cycleWidth`, `cycleWidthBack`, `setWidth(ratio)`, `resizeWidth(±ratio)`, `equalizeRow`, `cycleHeight`, `cycleHeightBack`, `setHeight(ratio|pt)`, `resizeHeight(±ratio)`, `toggleFullHeight`, `center`, `alignTop`, `scrollUp(ratio)`, `scrollDown(ratio)`, `scrollBy(pt)`, `scrollToTop`, `scrollToBottom`, `toggleFloat`, `toggleMaximize`, `toggleDesktopDrop`, `closeWindow`, `moveToNextScreen`, `undo`, `retile`, `toggleTiling`, `toggleSpaceTiling`, `editScrollArea`, `openSettings`, `reloadConfig`, `missionControl`, `appExpose`, `showDesktop`, `launchpad`.
 
 Commands can also be sent from the shell (skhd, Raycast, scripts):
 

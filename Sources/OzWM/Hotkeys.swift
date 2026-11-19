@@ -1,5 +1,5 @@
 import Carbon.HIToolbox
-import Foundation
+import Cocoa
 
 /// Global hotkeys via Carbon's RegisterEventHotKey (needs no extra permission).
 final class HotkeyCenter {
@@ -40,6 +40,8 @@ final class HotkeyCenter {
     }
 
     private func fire(_ id: UInt32) {
+        // A combo started with the modifiers of a held one: that wasn't the hold.
+        HoldShortcuts.shared.interrupt()
         guard !suspended else { return }
         actions[id]?()
     }
@@ -83,6 +85,7 @@ final class HotkeyCenter {
     }
 
     func unregisterAll() {
+        HoldShortcuts.shared.unregisterAll()
         entries.values.forEach { if let ref = $0.ref { UnregisterEventHotKey(ref) } }
         entries = [:]
         actions = [:]
@@ -198,4 +201,116 @@ final class HotkeyCenter {
         for (i, k) in fkeys.enumerated() { m["f\(i + 1)"] = k }
         return m
     }()
+}
+
+/// Shortcuts made of modifier keys alone, held down a while ("fn" for 2 s), optionally with
+/// an action for when they are let go again (a mode that lasts while they are held).
+/// RegisterEventHotKey needs a key besides the modifiers, so these watch the modifier keys
+/// themselves (event monitors, which the Accessibility permission covers). Any key or
+/// click while they are down, or another modifier, starts over: the modifiers were the
+/// start of something else (⌃⌥⇧J, a ⌃ click).
+final class HoldShortcuts {
+    static let shared = HoldShortcuts()
+
+    private struct Entry {
+        let mods: NSEvent.ModifierFlags
+        let seconds: Double
+        let action: () -> Void
+        let release: (() -> Void)?
+    }
+
+    private var entries: [Entry] = []
+    private var monitors: [Any] = []
+    private var timer: Timer?
+    /// The modifiers now down have fired their shortcut already: not again until let go.
+    private var fired = false
+    /// Fired, and waiting for the keys to be let go to run its release action.
+    private var held: Entry?
+
+    private static let watched: NSEvent.ModifierFlags = [.command, .option, .control, .shift, .function]
+
+    /// "ctrl+alt+shift", "meh", "hyper", "fn": only modifiers. nil when there is a key in it.
+    static func parse(_ combo: String) -> NSEvent.ModifierFlags? {
+        let parts = combo.lowercased().split(separator: "+").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard !parts.isEmpty else { return nil }
+        var mods: NSEvent.ModifierFlags = []
+        for m in parts {
+            switch m {
+            case "cmd", "command", "super": mods.insert(.command)
+            case "alt", "option", "opt": mods.insert(.option)
+            case "ctrl", "control": mods.insert(.control)
+            case "shift": mods.insert(.shift)
+            case "fn", "globe": mods.insert(.function)
+            case "hyper": mods.formUnion([.command, .option, .control, .shift])
+            case "meh": mods.formUnion([.option, .control, .shift])
+            default: return nil
+            }
+        }
+        return mods
+    }
+
+    /// `release`: run when the keys are let go after `action` ran.
+    func register(_ combo: String, seconds: Double, action: @escaping () -> Void, release: (() -> Void)? = nil) -> Bool {
+        guard let mods = HoldShortcuts.parse(combo), seconds > 0 else { return false }
+        entries.append(Entry(mods: mods, seconds: seconds, action: action, release: release))
+        watch()
+        return true
+    }
+
+    func unregisterAll() {
+        entries = []
+        held = nil
+        interrupt()
+        monitors.forEach { NSEvent.removeMonitor($0) }
+        monitors = []
+    }
+
+    /// Something else happened while the modifiers were down: no hold this time.
+    func interrupt() {
+        timer?.invalidate()
+        timer = nil
+        if !entries.isEmpty { fired = true }
+    }
+
+    private func watch() {
+        guard monitors.isEmpty else { return }
+        let others: NSEvent.EventTypeMask = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
+        if let m = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged, handler: { [weak self] e in self?.changed(e.modifierFlags) }) {
+            monitors.append(m)
+        }
+        if let m = NSEvent.addGlobalMonitorForEvents(matching: others, handler: { [weak self] _ in self?.interrupt() }) {
+            monitors.append(m)
+        }
+        // Oz's own windows (Settings) in front.
+        if let m = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged, handler: { [weak self] e in self?.changed(e.modifierFlags); return e }) {
+            monitors.append(m)
+        }
+        if let m = NSEvent.addLocalMonitorForEvents(matching: others, handler: { [weak self] e in self?.interrupt(); return e }) {
+            monitors.append(m)
+        }
+    }
+
+    private func changed(_ flags: NSEvent.ModifierFlags) {
+        timer?.invalidate()
+        timer = nil
+        let mods = flags.intersection(HoldShortcuts.watched)
+        // Let go (or another modifier pressed with them): what lasted while held ends.
+        if let h = held, mods != h.mods {
+            held = nil
+            h.release?()
+        }
+        // Every modifier let go (or another set pressed): the next hold may fire.
+        fired = false
+        guard !mods.isEmpty, let entry = entries.first(where: { $0.mods == mods }) else { return }
+        timer = Timer.scheduledTimer(withTimeInterval: entry.seconds, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.timer = nil
+            guard !self.fired, !HotkeyCenter.shared.suspended else { return }
+            // Still exactly these, as macOS has them now.
+            guard NSEvent.modifierFlags.intersection(HoldShortcuts.watched) == entry.mods else { return }
+            self.fired = true
+            if entry.release != nil { self.held = entry }
+            entry.action()
+        }
+    }
 }
