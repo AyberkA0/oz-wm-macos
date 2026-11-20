@@ -55,9 +55,39 @@ final class EscapeModeTests: XCTestCase {
         XCTAssertEqual(to.maxY, area.maxY)
     }
 
+    func testScrollingGrowsTowardTheOriginalSizeAndNoFurther() {
+        let original = CGSize(width: 800, height: 600)
+        let f = CGRect(x: 300, y: 300, width: 400, height: 300)
+        let bigger = EscapeMode.resized(f, by: 0.2, original: original, in: area)
+        XCTAssertGreaterThan(bigger.width, f.width)
+        XCTAssertEqual(bigger.width / bigger.height, 4.0 / 3, accuracy: 0.01)
+        XCTAssertEqual(bigger.midX, f.midX, accuracy: 1)
+        let most = EscapeMode.resized(f, by: 5, original: original, in: area)
+        XCTAssertEqual(most.size, original)
+        XCTAssertTrue(area.contains(most))
+        let least = EscapeMode.resized(f, by: -5, original: original, in: area)
+        XCTAssertEqual(least.width, EscapeMode.minWidth)
+    }
+
+    func testShrinkingAtTheSmallestDoesNotMoveIt() {
+        let original = CGSize(width: 800, height: 600)
+        var f = EscapeMode.resized(CGRect(x: 301, y: 301, width: 401, height: 301), by: -5, original: original, in: area)
+        let smallest = f
+        for _ in 0..<20 { f = EscapeMode.resized(f, by: -0.3, original: original, in: area) }
+        XCTAssertEqual(f, smallest)
+    }
+
+    func testFittedKeepsTheSizeAndComesInside() {
+        let f = EscapeMode.fitted(CGRect(x: 800, y: 700, width: 500, height: 300), in: area)
+        XCTAssertEqual(f.size, CGSize(width: 500, height: 300))
+        XCTAssertEqual(f.maxX, area.maxX)
+        XCTAssertEqual(f.maxY, area.maxY)
+    }
+
     func testNear() {
         let f = CGRect(x: 100, y: 100, width: 100, height: 100)
-        XCTAssertTrue(EscapeMode.isNear(CGPoint(x: 230, y: 150), f))
-        XCTAssertFalse(EscapeMode.isNear(CGPoint(x: 260, y: 150), f))
+        XCTAssertTrue(EscapeMode.isNear(CGPoint(x: 150, y: 150), f))
+        XCTAssertFalse(EscapeMode.isNear(CGPoint(x: 195, y: 150), f))  // at its edge
+        XCTAssertFalse(EscapeMode.isNear(CGPoint(x: 210, y: 150), f))
     }
 }

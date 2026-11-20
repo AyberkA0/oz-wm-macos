@@ -82,6 +82,13 @@ enum Timing {
     static let resnapCapture: CFTimeInterval = 0.05
     /// A window is re-snapshotted at a new size at most this often.
     static let resnapEvery: CFTimeInterval = 2
+    /// Escape mode's window shrinks once its app has moved it out of sight, or after this long.
+    static let escapeHideWait: CFTimeInterval = 0.3
+    /// Show Desktop asked for: macOS has it on within this long.
+    static let showDesktopWait: CFTimeInterval = 0.6
+    /// After a three-finger resize in escape mode, the pointer may move this far (pt, not a
+    /// time) before the window runs from it: room to resize again right at its edge.
+    static let swipeDodgeSlack: CGFloat = 60
 
     // MARK: Mission Control
 

@@ -8,8 +8,9 @@ public enum EscapeMode {
     /// always somewhere to go that the pointer isn't.
     public static let widthShare: CGFloat = 0.5
     public static let heightShare: CGFloat = 0.6
-    /// The pointer this close to the window (pt) sends it away.
-    public static let margin: CGFloat = 40
+    /// The pointer this far inside the window (pt) sends it away: up to its edge, and that
+    /// little way in, it stays, so its edge can be taken to resize it.
+    public static let edgeSlack: CGFloat = 16
 
     /// The window's frame in the mode: no bigger than its share of `area`, its shape kept
     /// (made smaller evenly, its picture shrinks into it without being squashed), its middle
@@ -32,9 +33,9 @@ public enum EscapeMode {
         return sides.first { r in !others.contains { $0.intersects(r.insetBy(dx: 2, dy: 2)) } }
     }
 
-    /// The pointer at `p` is on the window or close to it.
+    /// The pointer at `p` is on the window, past its edge.
     public static func isNear(_ p: CGPoint, _ f: CGRect) -> Bool {
-        f.insetBy(dx: -margin, dy: -margin).contains(p)
+        f.insetBy(dx: edgeSlack, dy: edgeSlack).contains(p)
     }
 
     /// Where the window `f` goes to get away from the pointer at `p`: of the corners, the
@@ -58,6 +59,32 @@ public enum EscapeMode {
             }
         }
         return best
+    }
+
+    /// Never made smaller than this wide by scrolling (pt).
+    public static let minWidth: CGFloat = 240
+
+    /// Scrolled in the mode: the window `f` made bigger (`amount` > 0) or smaller by a factor
+    /// of e^amount, toward its size `original` before the mode or away, its shape that of
+    /// `original`, its middle where it was as far as `area` allows. No bigger than `original`
+    /// or `area`, no narrower than `minWidth`.
+    public static func resized(_ f: CGRect, by amount: CGFloat, original: CGSize, in area: CGRect) -> CGRect {
+        let ow = max(original.width, 1), oh = max(original.height, 1)
+        let most = min(1, area.width / ow, area.height / oh)
+        let least = min(most, minWidth / ow)
+        let k = min(most, max(least, f.width / ow * exp(amount)))
+        let w = (ow * k).rounded(), h = (oh * k).rounded()
+        // At its smallest or biggest already: where it is (worked out again from its middle,
+        // rounding moved it a point each time, and it crept down the screen).
+        if abs(w - f.width) < 1 && abs(h - f.height) < 1 { return f }
+        return fitted(CGRect(x: (f.midX - w / 2).rounded(), y: (f.midY - h / 2).rounded(), width: w, height: h), in: area)
+    }
+
+    /// `f` moved (not resized) to lie inside `area` as far as it fits, from its top left.
+    public static func fitted(_ f: CGRect, in area: CGRect) -> CGRect {
+        let x = max(min(f.minX, area.maxX - f.width), area.minX)
+        let y = max(min(f.minY, area.maxY - f.height), area.minY)
+        return CGRect(x: x, y: y, width: f.width, height: f.height).integral
     }
 
     /// From `p` to the nearest point of `r` (0 inside it).

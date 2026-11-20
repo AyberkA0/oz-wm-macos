@@ -309,6 +309,13 @@ final class WindowManager {
         let before: CGRect?
         /// The floating and docked windows sent off the screen, and where they go back to.
         let away: [CGWindowID: CGRect]
+        /// `id`'s size before the mode: scrolling makes it bigger up to this.
+        let original: CGSize
+        /// Started from Show Desktop (the windows at the screen edges): let go, it goes back to it.
+        let desktopShown: Bool
+        /// The smallest its app lets it be, once seen: not shrunk further (asked smaller, it
+        /// kept its size where it was told to go, and crept across the screen).
+        var least: CGSize? = nil
         /// `id` is moving out of the pointer's way.
         var dodging = false
         /// Asked to end while something was being dragged to `id`: ends once it is dropped.
@@ -317,6 +324,10 @@ final class WindowManager {
         var closing = false
     }
     private var desk: DeskClear?
+    /// Floating windows going there and back drawn by their picture (`movePictured`): each
+    /// move's number and where its picture is now.
+    private var pictured: [CGWindowID: (token: Int, frame: CGRect)] = [:]
+    private var picturedCount = 0
     /// Escape mode's window going back to its row, until when: drawn as a picture too.
     private var escapeReturn: (id: CGWindowID, until: CFTimeInterval)?
     /// Escape mode's window as it was in its row, for the picture that grows back there (one
@@ -336,6 +347,15 @@ final class WindowManager {
     /// Oz's windows by when they last had focus, the latest first.
     private var focusHistory: [CGWindowID] = []
     private var deskTimer: Timer?
+    /// A three-finger swipe in escape mode, resizing its window.
+    private var deskSwipe = false
+    /// Where the pointer was when that swipe ended: the window, resized under it or up to
+    /// it, doesn't run from it until it has moved a little way off (`Timing.swipeDodgeSlack`).
+    private var deskSwipeEndedAt: CGPoint?
+    /// The window's middle when the swipe began: it grows and shrinks around it.
+    private var deskSwipeCenter: CGPoint?
+    /// Since when the app has kept its window bigger than asked during this swipe, and how big.
+    private var deskRefused: (since: CFTimeInterval, size: CGSize)?
     /// When `revealOnMouseUp` was set: the click's focus change can come before Oz hears of
     /// the press itself, and then belongs to this press, not an earlier one.
     private var revealNotedAt: CFTimeInterval = 0
@@ -2586,6 +2606,14 @@ final class WindowManager {
         }
         switch e {
         case .swipeBegan:
+            // Escape mode: the strip is away; the swipe resizes its window instead.
+            if desk != nil {
+                deskSwipe = true
+                deskSwipeEndedAt = nil
+                deskSwipeCenter = desk.map { CGPoint(x: $0.frame.midX, y: $0.frame.midY) }
+                deskRefused = nil
+                return
+            }
             guard settings.swipe.enabled, let screen = Geometry.screenUnderMouse() else { return }
             let key = visibleKey(for: screen)
             // A window fills the screen: a downward swipe puts it back to its size (and scrolls
@@ -2616,6 +2644,7 @@ final class WindowManager {
             Log.debug("swipe began")
 
         case .swipeChanged(let dy):
+            if deskSwipe { return resizeDesk(by: CGFloat(dy) * 2.5) }
             if refillSwipe != nil { return refillSwipeMoved(dy) }
             guard let g = gesture else { return }
             gesture?.padTravel += dy
@@ -2640,6 +2669,11 @@ final class WindowManager {
             markDirty(g.key)
 
         case .swipeEnded(let v):
+            if deskSwipe {
+                deskSwipe = false
+                deskSwipeEndedAt = NSEvent.mouseLocation
+                return
+            }
             if let r = refillSwipe {
                 refillSwipe = nil
                 return endRefillSwipe(r, velocity: v)
@@ -3196,6 +3230,8 @@ final class WindowManager {
             var placement = item.placement
             if let target = deskTarget(item, key: key, screen: screen) {
                 placement = item.id == desk?.id ? .frame(target) : .park
+                // Its real size is looked at once it has settled there (`syncDeskSize`).
+                if item.id == desk?.id { state[item.id].dockPlacedAt = CACurrentMediaTime() }
             }
             guard case .frame(let r) = placement else {
                 place(w, placement, screen: screen, rowHeight: item.rowHeight, hardTop: p.hardTop, clipBottom: p.clipBottom)
@@ -3667,7 +3703,7 @@ final class WindowManager {
             if contentDragging {
                 desk?.endOnDrop = true
             } else {
-                endDesk()
+                endDesk(asked: true)
             }
             return true
         }
@@ -3698,6 +3734,8 @@ final class WindowManager {
 
     /// Starts escape mode with `picked` (brought to the front first), or the window in front.
     private func startEscape(with picked: ManagedWindow?) -> Bool {
+        // Before bringing a window forward, which ends it.
+        let desktopShown = SystemActions.isDesktopShown
         // No window of Oz's in front (the desktop, an app it leaves alone): the one that last
         // was, if it is on a desktop showing now, comes to the front and escapes.
         var front = focusedWindowID().flatMap { windows[$0] ?? floating[$0] }
@@ -3734,7 +3772,8 @@ final class WindowManager {
         if strips[key] != nil && settings.animationDuration > 0 { pendingFrom[key] = visualFrames(key) }
         let area = Geometry.ax(screen.visibleFrame).insetBy(dx: settings.outerGap, dy: settings.outerGap)
         let target = EscapeMode.frame(for: current, in: area)
-        desk = DeskClear(key: key, id: id, frame: target, before: tiled ? nil : current, away: away)
+        desk = DeskClear(key: key, id: id, frame: target, before: tiled ? nil : current, away: away, original: current.size,
+                         desktopShown: desktopShown)
         for (fid, f) in away {
             guard let fw = floating[fid] else { continue }
             let to = EscapeMode.offEdge(f, screen: sf, others: others) ?? CGRect(origin: parkPoint(screen, size: f.size), size: f.size)
@@ -3744,7 +3783,12 @@ final class WindowManager {
         // got to (going on, it pulled the window back under the pointer).
         if !tiled { escapeFloating(w, from: current, to: target) { [weak self] in self?.desk?.id == id && self?.desk?.dodging == false } }
         escapeImage = tiled ? snapshots.latestImage(id).map { (id, $0) } : nil
-        slideEscape(key)
+        if tiled, escapeDuration > 0, strips[key] != nil,
+           let image = snapshots.image(id, size: current.size) ?? snapshots.latestImage(id) {
+            hideThenSlide(w, at: current, image: image, key: key, screen: screen)
+        } else {
+            slideEscape(key)
+        }
         deskTimer?.invalidate()
         deskTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.deskTick() }
         Log.info("escape mode on: \(w.appName) floats, \(away.count) floating window(s) and the strip away")
@@ -3753,10 +3797,15 @@ final class WindowManager {
 
     /// Everything back where it was: the strip's windows slide in from the edges, the
     /// floating ones go back to their places.
-    private func endDesk() {
+    /// `asked`: by the user (the keys let go), not by a desktop switch or the like.
+    private func endDesk(asked: Bool = false) {
         guard let d = desk else { return }
         deskTimer?.invalidate()
         deskTimer = nil
+        if asked, d.desktopShown, !SystemActions.isDesktopShown {
+            backToDesktopShown(d)
+            return
+        }
         // From where they are now (worked out while the desk still is).
         if strips[d.key] != nil, visibleScreen(d.key) != nil, settings.animationDuration > 0 {
             pendingFrom[d.key] = visualFrames(d.key)
@@ -3774,6 +3823,153 @@ final class WindowManager {
         }
         slideEscape(d.key)
         Log.info("escape mode off: windows back")
+    }
+
+    /// Escape mode started from Show Desktop ends in it again: Show Desktop on first, which
+    /// takes the window in front to the edge with the others, then everything put back in
+    /// one step (macOS keeps the windows Oz moves meanwhile at the edges, so nothing shows).
+    private func backToDesktopShown(_ d: DeskClear) {
+        desk = nil
+        pendingFrom[d.key] = nil
+        // Not on its way there or back as a picture any more.
+        if pictured.removeValue(forKey: d.id) != nil || state[d.id].clear(\.proxied) || overlays.isShowing(d.id) {
+            overlays.hide(d.id)
+        }
+        SystemActions.showDesktop()
+        let until = CACurrentMediaTime() + Timing.showDesktopWait
+        Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+            guard let self, self.desk == nil else { return timer.invalidate() }
+            guard SystemActions.isDesktopShown || CACurrentMediaTime() >= until else { return }
+            timer.invalidate()
+            for (id, f) in d.away {
+                guard let w = self.floating[id] else { continue }
+                self.state[id].dockPlacedAt = CACurrentMediaTime()
+                self.writer.move(id, pid: w.pid, element: w.element, to: f, setSize: true)
+                w.lastFrame = f
+            }
+            if let before = d.before, let w = self.floating[d.id] {
+                self.state[d.id].dockPlacedAt = CACurrentMediaTime()
+                self.writer.move(d.id, pid: w.pid, element: w.element, to: before, setSize: true)
+                w.lastFrame = before
+            }
+            if self.strips[d.key] != nil { self.relayout(d.key, animated: false) }
+        }
+        Log.info("escape mode off: back to the desktop shown")
+    }
+
+    /// Escape mode's window is drawn by its picture right where it is, and only once the real
+    /// one has gone out of sight does everything start moving: shrinking at once, the picture
+    /// showed small in front of the window still there full size until its app moved it.
+    private func hideThenSlide(_ w: ManagedWindow, at frame: CGRect, image: CGImage, key: StripKey, screen: NSScreen) {
+        let id = w.id
+        overlays.show(id, image: image, full: frame, clipTop: params(screen).hardTop,
+                      stream: false, moving: true, below: dragging)
+        state[id].proxied = true
+        state[id].proxyShownAt = CACurrentMediaTime()
+        var slid = false
+        let go = { [weak self] in
+            guard let self, !slid else { return }
+            slid = true
+            // Ended meanwhile: going back already slides them.
+            guard self.desk?.id == id else { return }
+            self.slideEscape(key)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Timing.standInSettle) { [weak self] in
+            guard let self, self.desk?.id == id, let w = self.windows[id] else { return go() }
+            self.park(w, screen: screen)
+            // Near where it was sent: macOS keeps a little of it on the screen, 30 pt off.
+            self.whenWindow(id, at: w.lastFrame?.origin ?? .zero, near: 64, within: Timing.escapeHideWait,
+                            stop: { slid }, then: go)
+        }
+    }
+
+    /// `then` runs a frame after the window server has `id` near `origin`, or once `within`
+    /// seconds have gone by; never if `stop` says so first. Its app being through the move
+    /// said nothing: an Electron app's window moved 40 ms and more after that.
+    private func whenWindow(_ id: CGWindowID, at origin: CGPoint, near: CGFloat, within: CFTimeInterval,
+                            stop: @escaping () -> Bool, then: @escaping () -> Void) {
+        let until = CACurrentMediaTime() + within
+        Timer.scheduledTimer(withTimeInterval: 1.0 / 120, repeats: true) { timer in
+            if stop() { return timer.invalidate() }
+            let there = WindowServer.window(id).map { hypot($0.bounds.minX - origin.x, $0.bounds.minY - origin.y) < near } ?? true
+            guard there || CACurrentMediaTime() >= until else { return }
+            timer.invalidate()
+            DispatchQueue.main.asyncAfter(deadline: .now() + (there ? 1.0 / 60 : 0)) { if !stop() { then() } }
+        }
+    }
+
+    /// A floating window of an app slow to move it goes to `to` drawn by its picture: the
+    /// window itself, out of sight meanwhile at its new size, takes the picture's place once
+    /// it is there. Moved every step it lagged and jumped, and moved in one step it jumped.
+    /// A move already on its way carries on from where its picture is.
+    private func movePictured(_ w: ManagedWindow, from: CGRect?, to: CGRect) {
+        let id = w.id
+        picturedCount += 1
+        let token = picturedCount
+        let running = pictured[id]
+        let start = running?.frame ?? from ?? w.lastFrame ?? to
+        let image = running != nil ? overlays.currentImage(id)
+            : WindowCapture.image(id, scale: snapshots.scale, expected: start.size)?.image
+        guard escapeDuration > 0, !start.approxEqual(to), let image,
+              let screen = Geometry.screen(containingAX: CGPoint(x: start.midX, y: start.midY))
+                ?? Geometry.screen(containingAX: CGPoint(x: to.midX, y: to.midY)) else {
+            if pictured.removeValue(forKey: id) != nil { overlays.hide(id) }
+            state[id].dockPlacedAt = CACurrentMediaTime()
+            writer.move(id, pid: w.pid, element: w.element, to: to, setSize: true)
+            w.lastFrame = to
+            return
+        }
+        pictured[id] = (token, start)
+        w.lastFrame = to
+        let current = { [weak self] in self?.pictured[id]?.token == token }
+        let draw = { [weak self] (f: CGRect) in
+            self?.overlays.show(id, image: image, full: f, clipTop: -.greatestFiniteMagnitude,
+                                stream: false, moving: true, below: self?.dragging)
+        }
+        draw(start)
+        let land = { [weak self] in
+            guard let self, current() else { return }
+            self.pictured[id] = nil
+            guard let w = self.floating[id] else { return self.overlays.hide(id) }
+            self.state[id].dockPlacedAt = CACurrentMediaTime()
+            self.writer.move(id, pid: w.pid, element: w.element, to: to, setSize: true)
+            w.lastFrame = to
+            // The picture stays on top, then fades, once the window is there under it.
+            self.overlays.handoff(id, to: to, delay: Timing.handOverGiveUp)
+            self.whenWindow(id, at: to.origin, near: 2, within: Timing.handOverGiveUp,
+                            stop: { [weak self] in self?.pictured[id] != nil }) { [weak self] in
+                self?.overlays.fadeOut(id)
+            }
+        }
+        let slide = { [weak self] in
+            guard let self, current() else { return }
+            let t0 = CACurrentMediaTime(), duration = self.escapeDuration
+            Timer.scheduledTimer(withTimeInterval: 1.0 / 120, repeats: true) { [weak self] timer in
+                guard let self, current() else { return timer.invalidate() }
+                let t = min(1, (CACurrentMediaTime() - t0) / duration)
+                let f = start.interpolated(to: to, CGFloat(1 - pow(1 - t, 3)))  // ease out
+                self.pictured[id] = (token, f)
+                draw(f)
+                if t >= 1 {
+                    timer.invalidate()
+                    land()
+                }
+            }
+        }
+        // Already out of sight (a move turned back): on its way at once.
+        if running != nil {
+            state[id].dockPlacedAt = CACurrentMediaTime()
+            writer.move(id, pid: w.pid, element: w.element,
+                        to: CGRect(origin: parkPoint(screen, size: to.size), size: to.size), setSize: true)
+            return slide()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Timing.standInSettle) { [weak self] in
+            guard let self, current(), let w = self.floating[id] else { return }
+            let p = self.parkPoint(screen, size: to.size)
+            self.state[id].dockPlacedAt = CACurrentMediaTime()
+            self.writer.move(id, pid: w.pid, element: w.element, to: CGRect(origin: p, size: to.size), setSize: true)
+            self.whenWindow(id, at: p, near: 64, within: Timing.escapeHideWait, stop: { !current() }, then: slide)
+        }
     }
 
     /// The strip's windows slide (off the edges or back) over `escapeDuration`.
@@ -3819,16 +4015,97 @@ final class WindowManager {
         }
     }
 
-    /// The floating window of escape mode to its size there and back: in one step for an app
-    /// slow to resize (resizing it every frame stuttered), else growing or shrinking there.
+    /// The floating window of escape mode to its size there and back: drawn by its picture for
+    /// an app slow to resize (resizing it every frame stuttered), else growing or shrinking there.
     private func escapeFloating(_ w: ManagedWindow, from: CGRect?, to: CGRect, still: @escaping () -> Bool) {
-        if writer.moveLatency(pid: w.pid) > settings.slowAppThreshold {
-            state[w.id].dockPlacedAt = CACurrentMediaTime()
-            writer.move(w.id, pid: w.pid, element: w.element, to: to, setSize: true)
-            w.lastFrame = to
+        if writer.moveLatency(pid: w.pid) > settings.slowAppThreshold || pictured[w.id] != nil {
+            movePictured(w, from: from, to: to)
         } else {
             animateFloating(w, from: from, to: to, duration: escapeDuration, still: still)
         }
+    }
+
+    /// The app may not take the size escape mode gives its window (Chrome is never narrower
+    /// than 500 pt): once the window is where it was put and has settled, its real size
+    /// counts, or it went partly off the screen getting out of the pointer's way.
+    private func syncDeskSize(_ w: ManagedWindow) {
+        guard var d = desk, !d.dodging,
+              CACurrentMediaTime() - (state[d.id].dockPlacedAt ?? 0) > Timing.frameCheck,
+              NSEvent.pressedMouseButtons & 1 == 0,
+              let b = WindowServer.window(d.id)?.bounds,
+              abs(b.width - d.frame.width) > 2 || abs(b.height - d.frame.height) > 2,
+              let screen = Geometry.screen(containingAX: CGPoint(x: d.frame.midX, y: d.frame.midY)) else { return }
+        guard abs(b.minX - d.frame.minX) <= 2, abs(b.minY - d.frame.minY) <= 2 else {
+            // Resized by its edge (the user's own): where and how big it is now.
+            d.frame = b
+            desk = d
+            w.lastFrame = b
+            return
+        }
+        let area = Geometry.ax(screen.visibleFrame).insetBy(dx: settings.outerGap, dy: settings.outerGap)
+        let f = EscapeMode.fitted(CGRect(origin: d.frame.origin, size: b.size), in: area)
+        // Bigger than Oz just made it: its app's smallest (bigger later, the user's own resize).
+        if CACurrentMediaTime() - (state[d.id].dockPlacedAt ?? 0) < 1.5,
+           b.width > d.frame.width + 2 || b.height > d.frame.height + 2 { d.least = b.size }
+        d.frame = f
+        desk = d
+        state[d.id].dockPlacedAt = CACurrentMediaTime()
+        if !f.origin.equalTo(b.origin) {
+            writer.move(d.id, pid: w.pid, element: w.element, to: f, setSize: false)
+        }
+        w.lastFrame = f
+    }
+
+    /// Three fingers up make escape mode's window bigger, toward its size before the mode;
+    /// down, smaller (`amount`: e^amount times; half the trackpad's height is 3.5 times).
+    private func resizeDesk(by amount: CGFloat) {
+        guard var d = desk, !d.closing, !d.dodging, amount != 0,
+              let w = windows[d.id] ?? floating[d.id],
+              !state[d.id].proxied, !overlays.isShowing(d.id), pictured[d.id] == nil,
+              let screen = Geometry.screen(containingAX: CGPoint(x: d.frame.midX, y: d.frame.midY)) else { return }
+        let area = Geometry.ax(screen.visibleFrame).insetBy(dx: settings.outerGap, dy: settings.outerGap)
+        let now = CACurrentMediaTime()
+        if amount < 0 {
+            if let least = d.least, d.frame.width <= least.width + 1 || d.frame.height <= least.height + 1 { return }
+            // Asked smaller and staying bigger, the same size, for a while: as small as its app goes.
+            if let b = WindowServer.window(d.id)?.bounds, b.width > d.frame.width + 2 || b.height > d.frame.height + 2 {
+                if let r = deskRefused, abs(r.size.width - b.width) < 1, abs(r.size.height - b.height) < 1 {
+                    if now - r.since > 0.25 {
+                        d.least = b.size
+                        let c = deskSwipeCenter ?? CGPoint(x: d.frame.midX, y: d.frame.midY)
+                        let f = EscapeMode.fitted(CGRect(x: (c.x - b.width / 2).rounded(), y: (c.y - b.height / 2).rounded(),
+                                                         width: b.width, height: b.height), in: area)
+                        d.frame = f
+                        desk = d
+                        state[d.id].dockPlacedAt = now
+                        writer.move(d.id, pid: w.pid, element: w.element, to: f, setSize: false)
+                        w.lastFrame = f
+                        return
+                    }
+                } else {
+                    deskRefused = (now, b.size)
+                }
+            } else {
+                deskRefused = nil
+            }
+        }
+        // Around the middle it had when the swipe began, not its last one (rounding moved that).
+        var from = d.frame
+        if let c = deskSwipeCenter {
+            from.origin = CGPoint(x: c.x - from.width / 2, y: c.y - from.height / 2)
+        }
+        var to = EscapeMode.resized(from, by: amount, original: d.original, in: area)
+        if let least = d.least, to.width < least.width || to.height < least.height {
+            to = EscapeMode.fitted(CGRect(x: from.midX - least.width / 2, y: from.midY - least.height / 2,
+                                          width: least.width, height: least.height), in: area)
+        }
+        guard !to.approxEqual(d.frame) else { return }
+        d.frame = to
+        desk = d
+        state[d.id].dockPlacedAt = CACurrentMediaTime()
+        writer.move(d.id, pid: w.pid, element: w.element, to: to, setSize: true)
+        w.lastFrame = to
+        w.parked = false
     }
 
     /// The left button is down dragging something (a file, text, a link), not a window.
@@ -3851,17 +4128,31 @@ final class WindowManager {
                 desk?.closing = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + Timing.afterDrop) { [weak self] in
                     guard self?.desk?.key == d.key else { return }
-                    self?.endDesk()
+                    self?.endDesk(asked: true)
                 }
             }
             return
         }
         guard !d.dodging, let w = windows[d.id] ?? floating[d.id] else { return }
+        // Still on its way there, drawn by its picture: moved now, the window itself came
+        // back small beside the picture still shrinking (two of it on the screen).
+        if state[d.id].proxied || overlays.isShowing(d.id) { return }
+        syncDeskSize(w)
+        guard let synced = desk else { return }
+        d = synced
         let m = NSEvent.mouseLocation
+        // Being resized, or just was with the pointer there: it stays put (running from the
+        // pointer as it grew up to it, the window jumped about under the fingers).
+        if deskSwipe { return }
+        if let at = deskSwipeEndedAt {
+            if hypot(m.x - at.x, m.y - at.y) < Timing.swipeDodgeSlack { return }
+            deskSwipeEndedAt = nil
+        }
         let p = CGPoint(x: m.x, y: Geometry.primaryHeight - m.y)
         guard EscapeMode.isNear(p, d.frame) else { return }
-        // Something being dragged to it: it stays to take the drop.
-        if contentDragging { return }
+        // The button down: something dragged to it (it stays to take the drop), or its edge
+        // taken to resize it.
+        if NSEvent.pressedMouseButtons & 1 != 0 { return }
         guard let screen = Geometry.screen(containingAX: CGPoint(x: d.frame.midX, y: d.frame.midY)) else { return }
         let area = Geometry.ax(screen.visibleFrame).insetBy(dx: settings.outerGap, dy: settings.outerGap)
         let to = EscapeMode.dodge(d.frame, from: p, in: area)

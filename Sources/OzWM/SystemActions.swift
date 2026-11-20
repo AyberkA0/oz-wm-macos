@@ -52,6 +52,22 @@ enum SystemActions {
         }
     }
 
+    /// Show Desktop is on (a click on the wallpaper, F11): the windows pushed to the screen
+    /// edges. macOS's WindowManager covers the screens with its overlay window meanwhile (and
+    /// keeps a window moved then at the edges too).
+    static var isDesktopShown: Bool {
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        let screens = NSScreen.screens.map { Geometry.ax($0.frame) }
+        return list.contains { w in
+            guard w[kCGWindowOwnerName as String] as? String == "WindowManager" else { return false }
+            if let name = w[kCGWindowName as String] as? String, !name.isEmpty { return name == "ShowDesktopOverlay" }
+            // No window names without the Screen Recording permission: its layer and size.
+            guard w[kCGWindowLayer as String] as? Int == 18, let b = w[kCGWindowBounds as String] as? NSDictionary,
+                  let r = CGRect(dictionaryRepresentation: b) else { return false }
+            return screens.contains { r.width >= $0.width - 1 && r.height >= $0.height - 1 }
+        }
+    }
+
     /// The desktop (Space) on the left (-1) or right (+1): macOS's own "Move left/right a
     /// space" shortcut, ⌃← / ⌃→.
     static func switchDesktop(_ dir: Int) {
