@@ -2,27 +2,27 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>
-    <string>Oz</string>
-    <key>CFBundleDisplayName</key>
-    <string>Oz Window Manager</string>
-    <key>CFBundleIdentifier</key>
-    <string>dev.oz.wm</string>
-    <key>CFBundleExecutable</key>
-    <string>OzWM</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>0.6.0beta</string>
-    <key>CFBundleVersion</key>
-    <string>0.6.0</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>NSAppSleepDisabled</key>
-    <true/>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSHighResolutionCapable</key>
-    <true/>
+	<key>CFBundleDisplayName</key>
+	<string>Oz Window Manager</string>
+	<key>CFBundleExecutable</key>
+	<string>OzWM</string>
+	<key>CFBundleIdentifier</key>
+	<string>dev.oz.wm</string>
+	<key>CFBundleName</key>
+	<string>Oz</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.6.1beta</string>
+	<key>CFBundleVersion</key>
+	<string>0.6.1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAppSleepDisabled</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
 </dict>
 </plist>
